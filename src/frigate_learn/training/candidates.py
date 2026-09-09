@@ -28,6 +28,8 @@ CANDIDATES: dict[str, Candidate] = {
     "yolo11n": Candidate("yolo11n", "yolo11n.pt", 2.6, 2.5),
     "yolo11s": Candidate("yolo11s", "yolo11s.pt", 9.4, 6.0),
     "yolo11m": Candidate("yolo11m", "yolo11m.pt", 20.1, 10.5),
+    "yolov9t": Candidate("yolov9t", "yolov9t.pt", 2.1, 4.5),
+    "yolov9s": Candidate("yolov9s", "yolov9s.pt", 7.3, 9.0),
 }
 
 
