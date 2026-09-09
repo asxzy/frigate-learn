@@ -5,6 +5,7 @@ Implemented commands (P1):
     frigate-learn db init|migrate|stats|migrations   manage the SQLite DB
     frigate-learn collect ...                         collect from Frigate
     frigate-learn status                              pipeline overview
+    frigate-learn web [--host --port]                 run the local webapp dashboard
 """
 
 from __future__ import annotations
@@ -852,6 +853,21 @@ def run(
         click.echo(f"[{marker}] {report.name:<10} {report.message}")
     if any(r.status == "failed" for r in reports):
         sys.exit(1)
+
+
+# --- webapp -----------------------------------------------------------------
+
+
+@cli.command()
+@click.option("--host", default="127.0.0.1", help="Bind address (default: 127.0.0.1).")
+@click.option("--port", type=int, default=8080, help="Port to listen on (default: 8080).")
+def web(host: str, port: int) -> None:
+    """Run the local webapp dashboard."""
+    import uvicorn
+
+    from .webapp.app import create_app
+
+    uvicorn.run(create_app(), host=host, port=port)
 
 
 def main() -> None:
