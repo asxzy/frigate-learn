@@ -1,0 +1,22 @@
+# Runtime data (source images, previews, datasets, golden, DB) - never commit.
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# env / secrets
+.env
+config.yaml
+config.local.yaml
+
+# local runtime state
+data/
+previews/
+golden/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite3

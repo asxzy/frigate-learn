@@ -1,0 +1,117 @@
+# Frigate Learn example configuration.
+# Copy to config.yaml. ${VAR} references are interpolated from the environment
+# (optionally provided by .env). Never put real secrets in this file.
+
+# --- Which classes does this deployment care about? -------------------------
+classes:
+  - person
+  - car
+  - bicycle
+  - motorcycle
+  - bus
+  - truck
+  - dog
+  - cat
+
+frigate:
+  base_url: "http://192.168.1.10:8971"   # or http://frigate:8971
+  token: "${FRIGATE_TOKEN}"
+  timeout_seconds: 30
+
+collection:
+  # default window used by `frigate-learn collect` when --from is omitted
+  default_days: 7
+  # cameras: [] means all cameras. Otherwise, e.g. ["driveway", "front-door"].
+  cameras: []
+  # labels: [] means all labels. Otherwise, e.g. ["person", "car"].
+  labels: []
+  # review severities collected by default: "detection" and/or "alert"
+  severity:
+    - detection
+    - alert
+  # optional caps
+  max_reviews: null
+  max_events: null
+  # parallel snapshot downloads (never on the Frigate VM - this runs elsewhere)
+  concurrency: 8
+  download_timeout_seconds: 60
+  # store the annotated (debug) snapshot alongside the clean training image
+  keep_annotated_snapshots: false
+  # P3 near-duplicate suppression. Exact SHA-256 duplicates are always skipped;
+  # phash_threshold (0..64 Hamming bits) additionally drops near-identical
+  # frames from the same camera.
+  dedup_enabled: true
+  phash_threshold: 10
+
+sampling:
+  # P3 - temporal sampling within an event. Off by default; when enabled,
+  # `collect` grabs up to max_samples_per_event frames per event (optionally a
+  # resampled snapshot via Frigate's snapshot timestamp parameter).
+  enabled: false
+  max_samples_per_event: 3
+  min_seconds_between_samples: 2
+
+# P4/P8 - VLM liason (openai-compatible chat completions endpoint).
+# base_url/api_key can come from the environment instead of this file.
+vlm:
+  enabled: false
+  provider: "openai"          # expects /v1/chat/completions with an image_url
+  model: "gpt-4o-mini"
+  base_url: "${VLM_BASE_URL:-https://api.openai.com/v1}"
+  api_key: "${VLM_API_KEY}"
+  batch_size: 4
+  temperature: 0.0
+  timeout_seconds: 120
+  # "{classes}" is interpolated with the configured class names.
+  system_prompt: >
+    You are a precise object-detection annotator. Return ONLY a JSON object of
+    the form {"objects": [{"label": <class>, "confidence": 0..1,
+    "bbox": [x1, y1, x2, y2]} ...]} with normalized coordinates in [0, 1].
+    Classes allowed: {classes}. Use an empty objects list if nothing is present.
+
+training:
+  image_size: 320
+  epochs: 50
+  model: "yolov8n"            # base weights for `frigate-learn train`
+  batch: 16
+  device: null                # e.g. "cuda:0", "cpu", "hailo" (later phases)
+  freeze: null                # freeze first N backbone layers (usually null/10)
+  project: null               # output dir for runs (default: data/training)
+  seed: 1234
+
+evaluation:
+  golden_dataset: "golden-v001"
+  # candidate models compared on the golden dataset; the deployment baseline is
+  # picked from this list (see deployment.baseline below).
+  candidates:
+    - "yolov8n"
+    - "yolov8s"
+
+deployment:
+  max_latency_ms: 20
+  min_recall_delta: -0.01
+  min_map50_delta: -0.01
+  max_cpu_percent: 80
+  # name (in evaluation.candidates) treated as the incumbent the gate compares
+  # candidates against. Gate PASS requires a candidate to stay within all deltas
+  # of this model.
+  baseline: "yolov8l"
+
+# P13 - what `frigate-learn run` (and the nightly cron) executes.
+automation:
+  enable:
+    - collect
+    - build
+  till: "build"               # stop at this stage (inclusive)
+  schedule: "0 3 * * *"       # cron shown in the systemd timer docs
+
+# --- Paths ---------------------------------------------------------------
+# All paths are resolved relative to this file's directory.
+data:
+  root: "data"
+  images: "images"
+  previews: "previews"
+  datasets: "datasets"
+  golden: "golden"
+  database: "frigate_learn.db"   # under data/ root
+  migrations: "migrations"

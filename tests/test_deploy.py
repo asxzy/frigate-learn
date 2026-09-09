@@ -1,0 +1,90 @@
+"""Deploy pipeline tests (Phase 12, dry-run only)."""
+
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+import pytest
+
+from frigate_learn.deploy.hailo import (
+    HailoCompilerMissing,
+    compile_hailo,
+    deploy,
+    render_frigate_detector_config,
+)
+from frigate_learn.evaluation.benchmark import CandidateResult
+from frigate_learn.evaluation.gate import GateResult, evaluate_gate
+from frigate_learn.evaluation.metrics import DetectionMetrics
+from frigate_learn.models import Deployment
+
+
+def test_render_frigate_detector_config():
+    snippet = render_frigate_detector_config("yolov8n-custom", "yolov8n-custom.hef", ["person", "car"])
+    assert "type: hailo" in snippet
+    assert snippet.find("hef_path: /usr/share/frigate/models/yolov8n-custom.hef") != -1
+    assert "num_classes: 2" in snippet
+
+
+def test_compile_hailo_dry_run_writes_placeholder(tmp_path):
+    onnx = tmp_path / "model.onnx"
+    onnx.write_text("# fake onnx", encoding="utf-8")
+    hef = compile_hailo(onnx, tmp_path / "out", dry_run=True)
+    assert hef.exists()
+    assert hef.suffix == ".hef"
+
+
+def test_compile_hailo_without_binary_raises(tmp_path):
+    onnx = tmp_path / "model.onnx"
+    onnx.write_text("# fake onnx", encoding="utf-8")
+    with pytest.raises(HailoCompilerMissing):
+        compile_hailo(onnx, tmp_path / "out", dry_run=False)
+
+
+def test_deploy_dry_run_writes_manifest_and_hef(config, db, tmp_path):
+    weights = tmp_path / "best.pt"
+    weights.write_text("# fake weights", encoding="utf-8")
+
+    outcome = deploy(
+        config, db,
+        model_name="yolov8n-nightly",
+        weights=weights,
+        version="v001",
+        imgsz=640,
+        dry_run=True,
+        out_dir=tmp_path / "models" / "yolov8n-nightly",
+    )
+    assert outcome.dry_run is True
+    assert outcome.onnx_path.exists()
+    assert outcome.hef_path.exists()
+
+    manifest = json.loads(outcome.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["model_name"] == "yolov8n-nightly"
+    assert manifest["version"] == "v001"
+    assert manifest["dry_run"] is True
+    assert len(manifest["hef_sha256"]) == 64
+
+    snippet = (outcome.manifest_path.parent / "frigate-detector.yml").read_text(encoding="utf-8")
+    assert "type: hailo" in snippet
+
+
+def test_deploy_records_deployment_row_when_gate_given(config, db, tmp_path):
+    weights = tmp_path / "best.pt"
+    weights.write_text("# fake", encoding="utf-8")
+    candidate = CandidateResult(
+        name="yolov8n",
+        metrics=DetectionMetrics(0.5, 0.6, 0.55, 0.6, 0.3, 0.1, 0.05, latency_ms=4.0),
+        version="v001",
+    )
+    gate = evaluate_gate(candidate, config.deployment, None)
+    outcome = deploy(
+        config, db, model_name="yolov8n", weights=weights, version="v001",
+        gate=gate, result=candidate, dry_run=True,
+        out_dir=tmp_path / "models" / "yolov8n",
+    )
+    assert outcome.deployment_id is not None
+    with db.session() as s:
+        row = s.get(Deployment, outcome.deployment_id)
+    assert row is not None
+    assert row.verdict == "PASS"
+    assert row.artifact_path == str(outcome.hef_path)
