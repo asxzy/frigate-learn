@@ -188,6 +188,7 @@ def _step_benchmark(config: AppConfig, db: Database, ctx: dict) -> StepReport:
         BenchmarkConfig,
         benchmark_candidate,
         golden_to_examples,
+        latest_trained_run,
         results_to_json,
     )
     from .evaluation.golden import GoldenDataset
@@ -209,6 +210,24 @@ def _step_benchmark(config: AppConfig, db: Database, ctx: dict) -> StepReport:
             spec.weights,
             imgsz=config.training.image_size,
             device=ctx.get("device"),
+        )
+        results.append(
+            benchmark_candidate(
+                backend,
+                examples,
+                version=config.evaluation.golden_dataset,
+                kind="golden",
+                config=BenchmarkConfig(classes=list(config.classes)),
+            )
+        )
+    trained = latest_trained_run(config)
+    if trained is not None and not any(r.name == trained[0] for r in results):
+        run_name, weights = trained
+        backend = UltralyticsBackend(
+            str(weights),
+            imgsz=config.training.image_size,
+            device=ctx.get("device"),
+            name=run_name,
         )
         results.append(
             benchmark_candidate(

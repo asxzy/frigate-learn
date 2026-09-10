@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 from PIL import Image
 
 from frigate_learn.collection.collector import CollectSummary
@@ -126,3 +128,31 @@ def test_pipeline_steps_registry_is_ordered():
     assert PIPELINE == [
         "collect", "verify", "build", "train", "benchmark", "gate", "deploy"
     ]
+
+
+def test_latest_trained_run_none_when_training_dir_missing(config, tmp_path):
+    from frigate_learn.evaluation.benchmark import latest_trained_run
+    assert latest_trained_run(config) is None
+
+
+def test_latest_trained_run_picks_newest_with_weights(config, tmp_path):
+    from frigate_learn.evaluation.benchmark import latest_trained_run
+    root = config.resolve(config.data.root, "training")
+    old = root / "yolov8s-v001"
+    new = root / "yolov8n-v003"
+    for d, mtime in ((old, 10), (new, 20)):
+        (d / "weights").mkdir(parents=True)
+        (d / "weights" / "best.pt").write_bytes(b"x")
+        (d / "results.csv").write_text("epoch\n", encoding="utf-8")
+        os.utime(d / "results.csv", (mtime, mtime))
+    name, weights = latest_trained_run(config)
+    assert name == "yolov8n-v003"
+    assert weights == new / "weights" / "best.pt"
+
+
+def test_latest_trained_run_skips_dir_without_weights(config, tmp_path):
+    from frigate_learn.evaluation.benchmark import latest_trained_run
+    root = config.resolve(config.data.root, "training")
+    (root / "yolov8n-v001" / "weights").mkdir(parents=True)
+    (root / "yolov8n-v001" / "results.csv").write_text("epoch\n", encoding="utf-8")
+    assert latest_trained_run(config) is None

@@ -644,6 +644,7 @@ def benchmark(
         BenchmarkConfig,
         benchmark_candidate,
         golden_to_examples,
+        latest_trained_run,
         results_to_json,
     )
     from .evaluation.golden import GoldenDataset
@@ -681,6 +682,34 @@ def benchmark(
                 config=BenchmarkConfig(classes=list(config.classes)),
             )
         )
+    trained = latest_trained_run(config)
+    if trained is not None and not any(r.name == trained[0] for r in results):
+        run_name, weights = trained
+        if dry_run:
+            result = benchmark_candidate(
+                _DryBackend(run_name),
+                examples,
+                version=golden.root.name,
+                kind="golden",
+                config=BenchmarkConfig(classes=list(config.classes)),
+            )
+            result.metrics.latency_ms = 0.0
+        else:
+            _require_ml()
+            backend = UltralyticsBackend(
+                str(weights),
+                imgsz=config.training.image_size,
+                device=config.training.device,
+                name=run_name,
+            )
+            result = benchmark_candidate(
+                backend,
+                examples,
+                version=golden.root.name,
+                kind="golden",
+                config=BenchmarkConfig(classes=list(config.classes)),
+            )
+        results.append(result)
     out_path = config.resolve(config.data.root, "benchmark-results.json")
     results_to_json(results, out_path)
     for r in results:

@@ -168,6 +168,24 @@ def benchmark_candidate(
     return CandidateResult(name=backend.name, metrics=metrics, version=version, kind=kind)
 
 
+def latest_trained_run(config) -> tuple[str, Path] | None:
+    root = config.resolve(config.data.root, "training")
+    if not root.is_dir():
+        return None
+    best_entry: tuple[str, Path, float] | None = None
+    for entry in root.iterdir():
+        if not entry.is_dir():
+            continue
+        weights = entry / "weights" / "best.pt"
+        if not weights.is_file():
+            continue
+        csv = entry / "results.csv"
+        mtime = csv.stat().st_mtime if csv.is_file() else weights.stat().st_mtime
+        if best_entry is None or mtime > best_entry[2]:
+            best_entry = (entry.name, weights, mtime)
+    return None if best_entry is None else (best_entry[0], best_entry[1])
+
+
 # --- Pareto frontier -------------------------------------------------------
 
 
