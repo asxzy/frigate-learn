@@ -17,11 +17,13 @@ from .events import Event, parse_event
 from .motion import MotionBucket, parse_motion_activity
 from .reviews import Review, parse_review
 from .snapshots import (
+    annotated_region_crop_params,
     annotated_snapshot_params,
     annotated_snapshot_url,
     clean_snapshot_params,
     clean_snapshot_url,
     motion_activity_url,
+    region_crop_params,
     review_preview_url,
 )
 
@@ -383,6 +385,37 @@ class FrigateClient:
             annotated_snapshot_url(event_id),
             output_path,
             params=annotated_snapshot_params(),
+            timeout=self.timeout,
+        )
+
+    def download_region_crop(
+        self,
+        event_id: str,
+        output_path: Any,
+        height: int,
+        timestamp: float | None = None,
+    ) -> str:
+        """Download a server-side region crop (clean, no overlays) for an event.
+
+        ``height`` is the requested output height in pixels; ``crop=1`` crops to
+        the event bounding box. See snapshots.py.
+        """
+        params = region_crop_params(height)
+        if timestamp is not None and timestamp > 0:
+            params["timestamp"] = timestamp
+        return self._download(
+            clean_snapshot_url(event_id),
+            output_path,
+            params=params,
+            timeout=self.timeout,
+        )
+
+    def download_annotated_crop(self, event_id: str, output_path: Any) -> str:
+        """Download an annotated region crop (debug only)."""
+        return self._download(
+            annotated_snapshot_url(event_id),
+            output_path,
+            params=annotated_region_crop_params(),
             timeout=self.timeout,
         )
 

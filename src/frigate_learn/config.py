@@ -51,6 +51,11 @@ class CollectionSettings:
     # frames from the same camera.
     dedup_enabled: bool = True
     phash_threshold: int = 10
+    # Collect server-side region crops (crop=1&height=<H> snapshots) instead of
+    # full frames, matching what Frigate feeds the detector. None -> use
+    # training.image_size as the crop height.
+    region_crop: bool = True
+    region_crop_height: int | None = None
 
 
 @dataclass
@@ -263,6 +268,10 @@ def build_config(raw: dict[str, Any], base_dir: Path) -> AppConfig:
     cfg.collection.dedup_enabled = bool(_pop(col, "dedup_enabled", cfg.collection.dedup_enabled))
     cfg.collection.phash_threshold = int(
         _pop(col, "phash_threshold", cfg.collection.phash_threshold)
+    )
+    cfg.collection.region_crop = bool(_pop(col, "region_crop", cfg.collection.region_crop))
+    cfg.collection.region_crop_height = _as_optional_int(
+        _pop(col, "region_crop_height", None)
     )
 
     samp = _section(raw, "sampling")

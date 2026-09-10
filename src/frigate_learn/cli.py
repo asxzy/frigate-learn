@@ -157,6 +157,8 @@ def _summary_lines(summary: CollectSummary) -> list[str]:
         f"Duplicates: {summary.duplicate_samples:,}",
         f"Failures: {summary.failures:,}",
     ]
+    if summary.skipped_no_box:
+        lines.append(f"No-box skipped: {summary.skipped_no_box:,}")
     if summary.error:
         lines.append(f"Error: {summary.error}")
     lines.append("")
@@ -174,6 +176,8 @@ def _summary_lines(summary: CollectSummary) -> list[str]:
               type=click.Choice(["alert", "detection"]), help="Severity (repeatable).")
 @click.option("--limit", type=int, default=None, help="Max reviews to process.")
 @click.option("--concurrency", type=int, default=None, help="Parallel downloads (default: config).")
+@click.option("--no-region-crop", "no_region_crop", is_flag=True, default=False,
+              help="Collect full-frame clean snapshots instead of region crops.")
 @click.pass_context
 def collect(
     ctx: click.Context,
@@ -185,9 +189,12 @@ def collect(
     severities: tuple[str, ...],
     limit: int | None,
     concurrency: int | None,
+    no_region_crop: bool,
 ) -> None:
     """Collect review/event data from Frigate into the local dataset."""
     config = _load_config(ctx)
+    if no_region_crop:
+        config.collection.region_crop = False
 
     now = datetime.now(timezone.utc).timestamp()
     if from_arg is not None:

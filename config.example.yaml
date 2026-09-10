@@ -42,6 +42,12 @@ collection:
   # frames from the same camera.
   dedup_enabled: true
   phash_threshold: 10
+  # region-crop collection (default on): download server-side crops
+  # (snapshot.jpg?crop=1&bbox=0&height=<H>) matching the detector input instead
+  # of full frames; the VLM labels those crops. False restores full-frame
+  # collection. region_crop_height falls back to training.image_size when null.
+  region_crop: true
+  region_crop_height: null
 
 sampling:
   # P3 - temporal sampling within an event. Off by default; when enabled,

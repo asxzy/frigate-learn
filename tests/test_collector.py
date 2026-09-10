@@ -15,7 +15,7 @@ from frigate_learn.db import Database
 from frigate_learn.frigate.client import FrigateAPIError
 from frigate_learn.frigate.events import parse_event
 from frigate_learn.frigate.reviews import parse_review
-from frigate_learn.models import Sample
+from frigate_learn.models import Annotation, Sample
 
 
 class FakeFrigate:
@@ -54,6 +54,20 @@ class FakeFrigate:
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(b"annotated-" + event_id.encode())
         self.downloads.append(("debug", event_id, dest))
+        return str(dest)
+
+    def download_region_crop(self, event_id, output_path, height, timestamp=None) -> str:
+        dest = Path(output_path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"\xff\xd8\xff\xe0fakecrop-" + event_id.encode())
+        self.downloads.append(("crop", event_id, dest, {"height": height, "timestamp": timestamp}))
+        return str(dest)
+
+    def download_annotated_crop(self, event_id, output_path) -> str:
+        dest = Path(output_path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"annotated-crop-" + event_id.encode())
+        self.downloads.append(("debug-crop", event_id, dest))
         return str(dest)
 
     def close(self) -> None:
@@ -95,6 +109,7 @@ def _event(e_id: str, camera: str, label: str, start: float,
 
 
 def test_happy_path(config, db, tmp_path):
+    config.collection.region_crop = False
     fake = FakeFrigate(
         reviews_raw=[
             _review("r1", "front", 200, ["e1"]),
@@ -137,6 +152,7 @@ def test_happy_path(config, db, tmp_path):
 
 
 def test_idempotent_second_run(config, db):
+    config.collection.region_crop = False
     fake = FakeFrigate(
         reviews_raw=[_review("r1", "front", 200, ["e1", "e2"])],
         events_raw={
@@ -166,6 +182,7 @@ def test_idempotent_second_run(config, db):
 
 
 def test_shared_event_deduped_across_reviews(config, db):
+    config.collection.region_crop = False
     fake = FakeFrigate(
         reviews_raw=[
             _review("r1", "front", 200, ["e1"]),
@@ -179,6 +196,7 @@ def test_shared_event_deduped_across_reviews(config, db):
 
 
 def test_failures_recorded(config, db):
+    config.collection.region_crop = False
     fake = FakeFrigate(
         reviews_raw=[
             _review("r1", "front", 200, ["e_ok", "e_fail"]),
@@ -201,6 +219,7 @@ def test_failures_recorded(config, db):
 
 
 def test_incomplete_event_skipped_when_completed_only(config, db):
+    config.collection.region_crop = False
     fake = FakeFrigate(
         reviews_raw=[_review("r1", "front", 200, ["e_pending"])],
         events_raw={
@@ -218,6 +237,7 @@ def test_incomplete_event_skipped_when_completed_only(config, db):
 
 
 def test_keep_annotated_snapshots(config, db):
+    config.collection.region_crop = False
     config.collection.keep_annotated_snapshots = True
     fake = FakeFrigate(
         reviews_raw=[_review("r1", "front", 200, ["e1"])],
@@ -232,6 +252,8 @@ def test_keep_annotated_snapshots(config, db):
 
 
 def test_labels_cameras_filters_passthrough(config, db):
+    config.collection.region_crop = False
+
     class RecordingFake(FakeFrigate):
         def __init__(self):
             super().__init__([], {})
@@ -258,3 +280,86 @@ def test_labels_cameras_filters_passthrough(config, db):
     assert fake.last_kwargs["cameras"] == ["front"]
     assert fake.last_kwargs["labels"] == ["person"]
     assert fake.last_kwargs["severity"] == ["alert"]
+
+
+def test_region_crop_default_collects_crops_not_full_frames(config, db):
+    fake = FakeFrigate(
+        reviews_raw=[_review("r1", "front", 200, ["e1"])],
+        events_raw={"e1": _event("e1", "front", "person", 200)},
+    )
+    summary = Collector(config, db, client=fake).collect(from_ts=0)
+    assert summary.new_samples == 1
+    assert summary.new_annotations == 0
+    assert [d[0] for d in fake.downloads] == ["crop"]
+    with db.session() as s:
+        row = s.query(Sample).one()
+        attrs = s.query(Annotation).all()
+    assert attrs == []
+    assert (row.frigate_x1, row.frigate_y1, row.frigate_x2, row.frigate_y2) == (0.1, 0.2, 0.4, 0.8)
+    image = Path(row.image_path)
+    assert image.is_file()
+    assert image.read_bytes().startswith(b"\xff\xd8\xff\xe0fakecrop-")
+
+
+def test_region_crop_default_height_from_training(config, db):
+    fake = FakeFrigate(
+        reviews_raw=[_review("r1", "front", 200, ["e1"])],
+        events_raw={"e1": _event("e1", "front", "person", 200)},
+    )
+    Collector(config, db, client=fake).collect(from_ts=0)
+    calls = [d for d in fake.downloads if d[0] == "crop"]
+    assert calls[0][3]["height"] == config.training.image_size
+
+
+def test_region_crop_configured_height(config, db):
+    config.collection.region_crop_height = 512
+    fake = FakeFrigate(
+        reviews_raw=[_review("r1", "front", 200, ["e1"])],
+        events_raw={"e1": _event("e1", "front", "person", 200)},
+    )
+    Collector(config, db, client=fake).collect(from_ts=0)
+    calls = [d for d in fake.downloads if d[0] == "crop"]
+    assert calls[0][3]["height"] == 512
+
+
+def test_region_crop_skips_degenerate_box(config, db):
+    fake = FakeFrigate(
+        reviews_raw=[_review("r1", "front", 200, ["e_bad"])],
+        events_raw={
+            "e_bad": _event("e_bad", "front", "person", 200, box=[0.0, 0.0, 0.0, 0.0]),
+        },
+    )
+    summary = Collector(config, db, client=fake).collect(from_ts=0)
+    assert summary.new_samples == 0
+    assert summary.skipped_no_box == 1
+    assert fake.downloads == []
+    with db.session() as s:
+        assert s.query(Sample).count() == 0
+
+
+def test_region_crop_forces_single_frame(config, db):
+    config.sampling.enabled = True
+    config.sampling.max_samples_per_event = 3
+    fake = FakeFrigate(
+        reviews_raw=[_review("r1", "front", 200, ["e1"])],
+        events_raw={"e1": _event("e1", "front", "person", 200)},
+    )
+    summary = Collector(config, db, client=fake).collect(from_ts=0)
+    assert summary.new_samples == 1
+    crops = [d for d in fake.downloads if d[0] == "crop"]
+    assert len(crops) == 1
+    assert crops[0][3]["timestamp"] is None
+
+
+def test_region_crop_debug_uses_annotated_crop(config, db):
+    config.collection.keep_annotated_snapshots = True
+    fake = FakeFrigate(
+        reviews_raw=[_review("r1", "front", 200, ["e1"])],
+        events_raw={"e1": _event("e1", "front", "person", 200)},
+    )
+    summary = Collector(config, db, client=fake).collect(from_ts=0)
+    assert summary.new_samples == 1
+    kinds = [d[0] for d in fake.downloads]
+    assert "debug-crop" in kinds
+    assert "clean" not in kinds
+    assert "debug" not in kinds

@@ -23,6 +23,8 @@ def test_defaults():
     assert cfg.evaluation.golden_dataset == "golden-v001"
     assert len(cfg.classes) >= 8
     assert "person" in cfg.classes
+    assert cfg.collection.region_crop is True
+    assert cfg.collection.region_crop_height is None
 
 
 def test_build_config_maps_sections():
@@ -38,6 +40,17 @@ def test_build_config_maps_sections():
     assert cfg.collection.cameras == ["front", "gate"]
     assert cfg.collection.severity == ["detection"]
     assert cfg.collection.concurrency == 3
+
+
+def test_collection_region_crop_settings():
+    raw = {
+        "classes": ["person"],
+        "collection": {"region_crop": False, "region_crop_height": 512},
+        "data": {"root": "var"},
+    }
+    cfg = build_config(raw, base_dir=Path("/tmp/x"))
+    assert cfg.collection.region_crop is False
+    assert cfg.collection.region_crop_height == 512
     assert cfg.data.root == "var"
     assert cfg.base_dir == Path("/tmp/x").resolve()
 

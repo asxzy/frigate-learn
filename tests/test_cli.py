@@ -83,6 +83,24 @@ def test_collect_output(dbenv, monkeypatch):
     assert "Done in 0.1s." in result.output
 
 
+def test_collect_no_region_crop_flag(dbenv, monkeypatch):
+    captured = {}
+
+    class RecordingCollector:
+        def __init__(self, config, database):
+            captured["region_crop"] = config.collection.region_crop
+            self.client = type("C", (), {"close": lambda self: None})()
+
+        def collect(self, from_ts, to_ts=None, cameras=None, labels=None, severity=None,
+                    limit=None, concurrency=None, progress=None):
+            return CollectSummary(new_samples=0)
+
+    monkeypatch.setattr("frigate_learn.cli.Collector", RecordingCollector)
+    result = CliRunner().invoke(cli, ["collect", "--no-region-crop"], env=dbenv)
+    assert result.exit_code == 0
+    assert captured["region_crop"] is False
+
+
 def test_collect_bad_severity(dbenv, monkeypatch):
     monkeypatch.setattr("frigate_learn.cli.Collector", lambda config, db: None)
     result = CliRunner().invoke(cli, ["collect", "--severity", "bogus"], env=dbenv)

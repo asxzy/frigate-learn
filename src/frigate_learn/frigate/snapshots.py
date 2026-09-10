@@ -27,6 +27,16 @@ def annotated_snapshot_params(**overrides: Any) -> dict[str, Any]:
     return params
 
 
+def region_crop_params(height: int) -> dict[str, Any]:
+    """Server-side region crop: clean snapshot cropped to the event bounding box."""
+    return clean_snapshot_params(crop=1, height=height)
+
+
+def annotated_region_crop_params() -> dict[str, Any]:
+    """Annotated (overlay) region crop used for debug snapshots."""
+    return {"download": 1, "crop": 1}
+
+
 def clean_snapshot_url(event_id: str) -> str:
     return f"/api/events/{event_id}/snapshot.jpg"
 
@@ -48,6 +58,8 @@ def motion_activity_url() -> str:
 __all__ = [
     "clean_snapshot_params",
     "annotated_snapshot_params",
+    "region_crop_params",
+    "annotated_region_crop_params",
     "clean_snapshot_url",
     "annotated_snapshot_url",
     "review_preview_url",

@@ -201,3 +201,41 @@ def test_list_events_windowed(mock_api):
     assert [e.id for e in events] == ["e1", "e2", "e3"]
     assert float(mock_api.calls[1].request.url.params["before"]) == 8000
     client.close()
+
+
+def test_download_region_crop_params(mock_api, tmp_path):
+    payload = b"\xff\xd8\xff\xe0fakecropjpeg"
+    mock_api.get("/api/events/e1/snapshot.jpg").mock(
+        return_value=Response(200, content=payload)
+    )
+    client = make_client()
+    dst = client.download_region_crop("e1", tmp_path / "crop" / "e1.jpg", height=320)
+    assert Path(dst).read_bytes() == payload
+    params = mock_api.calls[0].request.url.params
+    assert params["crop"] == "1"
+    assert params["bbox"] == "0"
+    assert params["timestamp"] == "0"
+    assert params["height"] == "320"
+    client.close()
+
+
+def test_download_region_crop_timestamp_param(mock_api, tmp_path):
+    mock_api.get("/api/events/e1/snapshot.jpg").mock(
+        return_value=Response(200, content=b"x")
+    )
+    client = make_client()
+    client.download_region_crop("e1", tmp_path / "e1.jpg", height=640, timestamp=123.0)
+    assert mock_api.calls[0].request.url.params["timestamp"] == "123.0"
+    client.close()
+
+
+def test_download_annotated_crop_params(mock_api, tmp_path):
+    mock_api.get("/api/events/e1/snapshot.jpg").mock(
+        return_value=Response(200, content=b"x")
+    )
+    client = make_client()
+    client.download_annotated_crop("e1", tmp_path / "e1-debug.jpg")
+    params = mock_api.calls[0].request.url.params
+    assert params["crop"] == "1"
+    assert "bbox" not in params
+    client.close()

@@ -49,6 +49,7 @@ class CollectSummary:
     new_samples: int = 0
     duplicate_samples: int = 0
     failures: int = 0
+    skipped_no_box: int = 0   # events skipped in crop mode for a degenerate box
     new_annotations: int = 0
     job_id: str | None = None
     range_from: float | None = None
@@ -64,9 +65,10 @@ class CollectSummary:
 class EventOutcome:
     """Per-event worker result."""
 
-    status: str          # ok | dup | fail
+    status: str          # ok | dup | fail | skip
     stored: int = 0      # samples inserted
     skipped: int = 0     # frames dropped as near-duplicates
+    annotations: int = 0 # annotation rows inserted for this event
     error: str | None = None
 
 
@@ -222,7 +224,9 @@ class Collector:
                 summary.duplicate_samples += outcome.skipped
                 if outcome.status == "ok":
                     summary.new_samples += outcome.stored
-                    summary.new_annotations += outcome.stored
+                    summary.new_annotations += outcome.annotations
+                elif outcome.status == "skip":
+                    summary.skipped_no_box += 1
                 elif outcome.status == "fail":
                     summary.failures += 1
                 else:
@@ -237,9 +241,13 @@ class Collector:
     def _frame_times(self, event) -> list[float | None]:
         """Decide which frame times to fetch for one event (P3 temporal sampling).
 
-        Returns ``[None]`` (the Frigate default frame) unless sampling is
-        enabled and the event spans enough time to space frames apart.
+        Region crops are single-frame only: the event box is a single-frame
+        artifact, so a stale box on a resampled frame would crop the wrong area.
+        Returns ``[None]`` (the Frigate default frame) in that case, or unless
+        sampling is enabled and the event spans enough time to space frames apart.
         """
+        if self.config.collection.region_crop:
+            return [None]
         samp = self.config.sampling
         if not samp.enabled or samp.max_samples_per_event <= 1:
             return [None]
@@ -248,6 +256,14 @@ class Collector:
             min_gap=samp.min_seconds_between_samples,
         )
         return [t if t != event.start_time else None for t in times]
+
+    @staticmethod
+    def _has_sane_box(box) -> bool:
+        """A usable Frigate event box: 4 normalized coords with positive area."""
+        if not box or len(box) != 4:
+            return False
+        x1, y1, x2, y2 = box
+        return 0.0 <= x1 < x2 <= 1.0 and 0.0 <= y1 < y2 <= 1.0
 
     def _is_duplicate_frame(
         self, camera: str, image_hash: str | None, image_path: Path
@@ -290,12 +306,23 @@ class Collector:
                     f"event not completed (end_time is None); refusing in-progress snapshot"
                 )
 
+            crop = self.config.collection.region_crop
+            if crop and not self._has_sane_box(event.box):
+                return EventOutcome(status="skip")
+            crop_height = self.config.collection.region_crop_height or self.config.training.image_size
+
             stored = 0
             skipped = 0
+            annotations = 0
             for frame_index, frame_ts in enumerate(self._frame_times(event)):
                 sample_id = str(uuid.uuid4())
                 image_path = self._image_path(event.camera, event.start_time, sample_id)
-                self.client.download_clean_snapshot(event_id, image_path, timestamp=frame_ts)
+                if crop:
+                    self.client.download_region_crop(
+                        event_id, image_path, height=crop_height, timestamp=frame_ts
+                    )
+                else:
+                    self.client.download_clean_snapshot(event_id, image_path, timestamp=frame_ts)
                 image_hash = self._hash_file(image_path)
 
                 if self._is_duplicate_frame(event.camera, image_hash, image_path):
@@ -307,7 +334,10 @@ class Collector:
                 debug_path = None
                 if self.config.collection.keep_annotated_snapshots:
                     debug_path = image_path.with_name(f"{sample_id}-debug.jpg")
-                    self.client.download_event_snapshot(event_id, debug_path)
+                    if crop:
+                        self.client.download_annotated_crop(event_id, debug_path)
+                    else:
+                        self.client.download_event_snapshot(event_id, debug_path)
 
                 phash = None
                 if self.config.collection.dedup_enabled:
@@ -337,22 +367,25 @@ class Collector:
                     frigate_y2=box[3] if box else None,
                     status="collected",
                 )
-                annotation = Annotation(
-                    id=str(uuid.uuid4()),
-                    sample_id=sample_id,
-                    source="frigate",
-                    label=event.label,
-                    x1=sample.frigate_x1,
-                    y1=sample.frigate_y1,
-                    x2=sample.frigate_x2,
-                    y2=sample.frigate_y2,
-                    confidence=sample.frigate_score,
-                    verified=0,
-                )
                 with self.db.session() as session:
                     session.add(sample)
                     session.flush()  # persist the sample before its FK-dependent annotation
-                    session.add(annotation)
+                    if not crop:
+                        session.add(
+                            Annotation(
+                                id=str(uuid.uuid4()),
+                                sample_id=sample_id,
+                                source="frigate",
+                                label=event.label,
+                                x1=sample.frigate_x1,
+                                y1=sample.frigate_y1,
+                                x2=sample.frigate_x2,
+                                y2=sample.frigate_y2,
+                                confidence=sample.frigate_score,
+                                verified=0,
+                            )
+                        )
+                        annotations += 1
                     session.commit()
                 info(
                     "collected sample",
@@ -361,11 +394,13 @@ class Collector:
                     frame_index=frame_index,
                     sample_id=sample_id,
                     label=event.label,
+                    crop=crop,
                 )
                 stored += 1
 
             if stored:
-                return EventOutcome(status="ok", stored=stored, skipped=skipped)
+                return EventOutcome(status="ok", stored=stored, skipped=skipped,
+                                    annotations=annotations)
             return EventOutcome(status="dup", stored=0, skipped=skipped)
         except FrigateAPIError as exc:
             error("event failed (api)", event_id=event_id, error=str(exc))
@@ -427,6 +462,7 @@ class Collector:
                 "new_samples": summary.new_samples,
                 "duplicates": summary.duplicate_samples,
                 "failures": summary.failures,
+                "skipped_no_box": summary.skipped_no_box,
                 "range_from": summary.range_from,
                 "range_to": summary.range_to,
                 "cameras": summary.cameras,
