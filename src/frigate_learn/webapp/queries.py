@@ -242,8 +242,8 @@ def samples(
             query = query.filter(Sample.quality == quality)
         if camera is not None:
             query = query.filter(Sample.camera == camera)
-        if verified:
-            query = query.filter(Sample.verified == 1)
+        if verified is not None:
+            query = query.filter(Sample.verified == int(verified))
         total = query.count()
         rows = (
             query.order_by(Sample.timestamp.desc(), Sample.id)
@@ -279,9 +279,6 @@ def sample_detail(db, sample_id) -> dict | None:
         result["image_url"] = f"/images/{sample.id}"
         result["thumb_url"] = f"/images/{sample.id}/thumb"
     return result
-
-
-# --- helpers ----------------------------------------------------------------
 
 
 def _job_item(job) -> dict:

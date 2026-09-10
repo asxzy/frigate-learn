@@ -38,8 +38,6 @@ def test_app_uses_default_config_without_arg(tmp_path, monkeypatch):
     assert client.get("/api/health").status_code == 200
 
 
-# --- task 2: read-side queries ---------------------------------------------
-
 import json
 
 from frigate_learn.db import Database
@@ -417,6 +415,12 @@ def test_samples_filters(seeded):
     assert [s["id"] for s in queries.samples(db, quality="bad")["samples"]] == ["s3"]
     assert {s["id"] for s in queries.samples(db, camera="front")["samples"]} == {"s1", "s2"}
     assert [s["id"] for s in queries.samples(db, status="reviewed")["samples"]] == ["s3"]
+
+
+def test_samples_verified_exact_match(seeded):
+    _, db = seeded
+    assert [s["id"] for s in queries.samples(db, verified=0)["samples"]] == ["s2", "s3"]
+    assert [s["id"] for s in queries.samples(db, verified=1)["samples"]] == ["s1"]
 
 
 def test_samples_limit_clamp(seeded):
