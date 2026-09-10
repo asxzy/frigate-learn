@@ -14,7 +14,8 @@ datasets/<version>/
 ````
 
 Annotations choose the *best available* label per sample: a verified VLM/human
-annotation first, then the original Frigate detection. Only classes in
+annotation first; the original Frigate detection is used only when
+`verified_only=False` (the `--include-unverified` opt-in). Only classes in
 ``config.classes`` survive; everything else is dropped (and counted).
 """
 

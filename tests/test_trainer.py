@@ -6,7 +6,11 @@ import json
 
 from frigate_learn.evaluation.benchmark import CandidateResult
 from frigate_learn.evaluation.metrics import DetectionMetrics
-from frigate_learn.training.trainer import _write_before_after, evaluate_on_golden
+from frigate_learn.training.trainer import (
+    _safe_before_after,
+    _write_before_after,
+    evaluate_on_golden,
+)
 
 
 def test_evaluate_on_golden_missing_golden_dir_returns_none(config):
@@ -85,4 +89,16 @@ def test_write_before_after_missing_golden_returns_false(config, tmp_path, monke
         lambda config, weights, *, name: None,
     )
     assert _write_before_after(config, "b.pt", "a.pt", run_dir, name="y") is False
+    assert not (run_dir / "before_after.json").exists()
+
+
+def test_safe_before_after_survives_golden_failure(config, tmp_path, monkeypatch):
+    run_dir = tmp_path / "runs" / "x"
+    run_dir.mkdir(parents=True)
+
+    def _boom(config, weights, *, name):
+        raise RuntimeError("corrupt golden")
+
+    monkeypatch.setattr("frigate_learn.training.trainer.evaluate_on_golden", _boom)
+    assert _safe_before_after(config, "b.pt", "a.pt", run_dir, name="y") is False
     assert not (run_dir / "before_after.json").exists()

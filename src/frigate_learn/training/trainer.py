@@ -15,7 +15,7 @@ from pathlib import Path
 
 from ..config import AppConfig
 from ..db import Database
-from ..logutil import info
+from ..logutil import error, info
 from .candidates import resolve
 
 
@@ -96,6 +96,21 @@ def _write_before_after(
         delta=f"{payload['delta']['map50']:+.3f}",
     )
     return True
+
+
+def _safe_before_after(
+    config: AppConfig,
+    before_weights: str,
+    after_weights: str,
+    run_dir: Path,
+    *,
+    name: str,
+) -> bool:
+    try:
+        return _write_before_after(config, before_weights, after_weights, run_dir, name=name)
+    except Exception as exc:
+        error("before/after golden skipped", reason=str(exc))
+        return False
 
 
 class Trainer:
@@ -179,7 +194,7 @@ class Trainer:
             best = Path(getattr(results, "save_dir", run_dir)) / "weights" / "best.pt"
             metrics = dict(getattr(results, "results_dict", {}) or {})
             if best.exists():
-                _write_before_after(
+                _safe_before_after(
                     self.config, str(candidate.weights), str(best), run_dir, name=name
                 )
         except ImportError as exc:  # pragma: no cover - guarded by CLI precheck

@@ -262,4 +262,5 @@ __all__ = [
     "results_from_json",
     "golden_to_examples",
     "collect_examples_from_golden",
+    "latest_trained_run",
 ]
