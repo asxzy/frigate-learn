@@ -59,7 +59,7 @@ function fmtBytes(n) {
 }
 
 function pill(cls, text) {
-  return `<span class="pill ${cls}">${esc(text)}</span>`;
+  return `<span class="pill ${esc(cls)}">${esc(text)}</span>`;
 }
 
 function pillNode(text, quality) {

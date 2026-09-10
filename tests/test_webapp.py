@@ -320,6 +320,30 @@ def test_deployments(seeded):
     assert bottom["deployed_at"] is None
 
 
+def test_deployments_corrupt_metrics_returns_none(tmp_path):
+    cfg = build_config({"data": {"root": "data"}}, tmp_path)
+    db = Database(cfg.database_path())
+    db.init()
+    with db.session() as session:
+        session.add(Deployment(
+            id="d-corrupt",
+            model_name="yolov8n",
+            version="golden-v001",
+            metrics_json='{"precision":',
+            reasons_json=json.dumps(["ok"]),
+            verdict="PASS",
+            deployed=1,
+            deployed_at=None,
+            created_at="2026-09-09T00:00:00+00:00",
+        ))
+        session.commit()
+    result = queries.deployments(db)
+    row = result["deployments"][0]
+    assert row["metrics"] is None
+    assert row["reasons"] == ["ok"]
+    db.dispose()
+
+
 def test_quality_counts(seeded):
     _, db = seeded
     result = queries.quality_counts(db)

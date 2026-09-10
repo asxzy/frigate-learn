@@ -295,7 +295,10 @@ def _job_item(job) -> dict:
 def _parse_json(value) -> object | None:
     if not value:
         return None
-    return json.loads(value)
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError:
+        return None
 
 
 def _dataset_version(entry: Path) -> dict:
