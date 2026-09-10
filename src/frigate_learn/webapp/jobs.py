@@ -51,6 +51,7 @@ class JobManager:
         self._thread: threading.Thread | None = None
         self._job_id: str | None = None
         self._tail: list[str] = []
+        self._start_lock = threading.Lock()
         self._tail_lock = threading.Lock()
         self.mark_stale_running()
 
@@ -69,21 +70,22 @@ class JobManager:
         for step in steps:
             if step not in PIPELINE:
                 raise ValueError(f"unknown step: {step}")
-        if (self._thread and self._thread.is_alive()) or self._running_job_id():
-            raise JobRunningError("a job is already running")
-        job_id = uuid4().hex[:12]
-        with self.db.session() as session:
-            session.add(
-                Job(id=job_id, type="pipeline", status="running", started_at=utcnow())
+        with self._start_lock:
+            if (self._thread and self._thread.is_alive()) or self._running_job_id():
+                raise JobRunningError("a job is already running")
+            job_id = uuid4().hex[:12]
+            with self.db.session() as session:
+                session.add(
+                    Job(id=job_id, type="pipeline", status="running", started_at=utcnow())
+                )
+                session.commit()
+            self._job_id = job_id
+            self._tail = []
+            self._thread = threading.Thread(
+                target=self._run, args=(job_id, steps, dry_run), daemon=True
             )
-            session.commit()
-        self._job_id = job_id
-        self._tail = []
-        self._thread = threading.Thread(
-            target=self._run, args=(job_id, steps, dry_run), daemon=True
-        )
-        self._thread.start()
-        return job_id
+            self._thread.start()
+            return job_id
 
     def _run(self, job_id: str, steps: list[str], dry_run: bool) -> None:
         logger = logging.getLogger("frigate_learn")

@@ -788,3 +788,56 @@ def test_job_recent_orders_by_started_at_desc_and_shapes(tmp_path):
     assert mid["log_tail"] == []
     assert mid["error"] is None
     db.dispose()
+
+
+def test_job_concurrent_start_one_winner(tmp_path, monkeypatch):
+    cfg, db = _job_db(tmp_path)
+    manager = JobManager(cfg, db)
+    barrier = threading.Barrier(2)
+    event = threading.Event()
+
+    def _blocking_stub(config, db, **kwargs):
+        event.wait(timeout=10)
+        return _finished_reports()
+
+    monkeypatch.setattr("frigate_learn.webapp.jobs.run_pipeline", _blocking_stub)
+
+    results = [None, None]
+    errors = [None, None]
+
+    def _call_start(idx):
+        barrier.wait(timeout=5)
+        try:
+            results[idx] = manager.start(["collect"])
+        except Exception as exc:
+            errors[idx] = exc
+
+    t1 = threading.Thread(target=_call_start, args=(0,))
+    t2 = threading.Thread(target=_call_start, args=(1,))
+    t1.start()
+    t2.start()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
+
+    winners = [r for r in results if r is not None]
+    losers = [e for e in errors if isinstance(e, JobRunningError)]
+    assert len(winners) == 1
+    assert len(losers) == 1
+
+    with db.session() as session:
+        running = (
+            session.query(Job)
+            .filter(Job.status == "running")
+            .count()
+        )
+    assert running == 1
+
+    event.set()
+    manager._thread.join(timeout=10)
+    result = manager.get(winners[0])
+    assert result["status"] == "finished"
+    assert result["error"] is None
+
+    with db.session() as session:
+        assert session.query(Job).filter(Job.status == "running").count() == 0
+    db.dispose()
