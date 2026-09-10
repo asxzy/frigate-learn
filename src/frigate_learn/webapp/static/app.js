@@ -882,7 +882,12 @@ async function pollJobs() {
     const running = jobs.some((j) => j.status === "running");
     const becameIdle = hasRunning && !running;
     hasRunning = running;
-    $("#job-banner").hidden = !running;
+    const banner = $("#job-banner");
+    banner.hidden = !running;
+    document.body.classList.toggle("running", running);
+    if (running) {
+      document.documentElement.style.setProperty("--banner-h", banner.offsetHeight + "px");
+    }
     if (running && currentView === "overview" && views.overview.loaded) {
       render("overview");
     }
@@ -897,6 +902,8 @@ async function pollJobs() {
   }
 }
 
-render("overview");
-pollJobs();
-setInterval(pollJobs, POLL_MS);
+(async () => {
+  await pollJobs();
+  render("overview");
+  setInterval(pollJobs, POLL_MS);
+})();
