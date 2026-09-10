@@ -1,12 +1,22 @@
 from __future__ import annotations
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel, Field
 
 from ..inspect.triage import set_sample_quality, validate_quality
 from . import queries
 from .jobs import JobManager, JobRunningError
 from .serving import resolve_image, resolve_thumb
+
+
+class JobRunRequest(BaseModel):
+    steps: list[str]
+    dry_run: bool = Field(default=False, strict=True)
+
+
+class QualityRequest(BaseModel):
+    quality: str
 
 
 def register_routes(app: FastAPI) -> None:
@@ -81,13 +91,10 @@ def register_routes(app: FastAPI) -> None:
             return JSONResponse({"detail": "unknown job"}, status_code=404)
         return result
 
-    @app.post("/api/jobs/run", response_model=None)
-    async def jobs_run(request: Request):
-        body = await request.json()
-        step_list = body.get("steps", [])
-        dry_run = body.get("dry_run", False)
+    @app.post("/api/jobs/run")
+    async def jobs_run(body: JobRunRequest):
         try:
-            job_id = jobs.start(step_list, dry_run=dry_run)
+            job_id = jobs.start(body.steps, dry_run=body.dry_run)
         except JobRunningError:
             return JSONResponse(
                 {"detail": "a pipeline job is already running"}, status_code=409,
@@ -96,15 +103,13 @@ def register_routes(app: FastAPI) -> None:
             return JSONResponse({"detail": str(exc)}, status_code=422)
         return JSONResponse({"job_id": job_id}, status_code=202)
 
-    @app.post("/api/samples/{sample_id}/quality", response_model=None)
-    async def sample_quality(sample_id: str, request: Request):
-        body = await request.json()
-        quality_val = body.get("quality")
+    @app.post("/api/samples/{sample_id}/quality")
+    async def sample_quality(sample_id: str, body: QualityRequest):
         try:
-            validate_quality(quality_val)
+            validate_quality(body.quality)
         except (ValueError, TypeError) as exc:
             return JSONResponse({"detail": str(exc)}, status_code=400)
-        updated = set_sample_quality(config, db, sample_id, quality_val)
+        updated = set_sample_quality(config, db, sample_id, body.quality)
         if not updated:
             return JSONResponse({"detail": "unknown sample"}, status_code=404)
         return queries.sample_detail(db, sample_id)

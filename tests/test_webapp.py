@@ -1106,6 +1106,41 @@ def test_api_image_no_file(tmp_path, monkeypatch):
 
 def test_api_image_thumb_no_file(tmp_path, monkeypatch):
     c, _ = _api_client(tmp_path, monkeypatch)
-    r = c.get("/images/s2/thumb")
+    r = c.get("/images/does-not-exist/thumb")
     assert r.status_code == 404
     assert r.json()["error"] == "not found"
+
+
+# --- Body validation 422 tests ---
+
+
+def test_api_jobs_run_malformed_json(tmp_path, monkeypatch):
+    c, _ = _api_client(tmp_path, monkeypatch)
+    r = c.post(
+        "/api/jobs/run",
+        content="{invalid json",
+        headers={"content-type": "application/json"},
+    )
+    assert r.status_code == 422
+
+
+def test_api_jobs_run_steps_not_list(tmp_path, monkeypatch):
+    c, _ = _api_client(tmp_path, monkeypatch)
+    r = c.post("/api/jobs/run", json={"steps": 3})
+    assert r.status_code == 422
+
+
+def test_api_jobs_run_dry_run_string(tmp_path, monkeypatch):
+    c, _ = _api_client(tmp_path, monkeypatch)
+    r = c.post("/api/jobs/run", json={"steps": ["build"], "dry_run": "false"})
+    assert r.status_code == 422
+
+
+def test_api_samples_quality_malformed_json(tmp_path, monkeypatch):
+    c, _ = _api_client(tmp_path, monkeypatch)
+    r = c.post(
+        "/api/samples/s1/quality",
+        content="{invalid json",
+        headers={"content-type": "application/json"},
+    )
+    assert r.status_code == 422
