@@ -110,6 +110,50 @@ cp config.example.yaml config.yaml
 samples (dedup by Frigate `event_id`, with SHA-256 image hashing + optional
 dHash near-duplicate suppression).
 
+## Webapp
+
+A local dashboard (`frigate-learn web`) is the pipeline's control panel: it
+reads the same SQLite DB and config the CLI uses, and lets you inspect state,
+launch pipeline stages, and triage samples from the browser — no shell needed.
+
+```bash
+# one-time extra (fastapi + uvicorn)
+.venv/bin/pip install -e ".[web]"
+
+# run the dashboard, then open http://127.0.0.1:8080 in a browser
+.venv/bin/frigate-learn web --host 127.0.0.1 --port 8080
+```
+
+The SPA has no build step (plain HTML/JS with a vendored uPlot) and six views:
+
+- **Overview** — headline counts (samples, cameras, disk free, VLM status),
+  quality verdict totals, next build version, recent `jobs`, and the
+  pipeline-stage strip.
+- **Benchmark** — candidate-vs-baseline metrics, a latency vs mAP50 scatter,
+  the deployments ledger, and the **Re-benchmark + gate** button.
+- **Quality** — verdict totals, verified boxes per class, and the review
+  backlog of unverified samples.
+- **Datasets** — dataset version table (train/val splits, verified counts) and
+  golden-dataset status.
+- **Training** — pick a training run: best/latest mAP50, weights presence, and
+  mAP50/recall epoch curves.
+- **Triage** — filter the sample grid (quality/status/camera/verified); click a
+  thumbnail for a lightbox with detection + Frigate bbox overlays.
+
+There are two POST actions: the **Re-benchmark + gate** button runs the
+`benchmark` and `gate` stages, and the Triage lightbox sets a sample's quality
+verdict (`useful` / `bad` / `duplicate` / `ignore`).
+
+Constraints, plainly:
+
+- Localhost-only and single-user: no auth, no CORS. Bind to `127.0.0.1` and
+  don't expose it on a network.
+- Pipeline stages run **in the same process as the server** (a background
+  thread). Stopping the server stops a running stage; a restart marks the stale
+  job `failed`.
+- Every run is recorded in the `jobs` table and shown in Overview; only one
+  pipeline job runs at a time.
+
 ## Deploy decision: real benchmark + gate
 
 The deploy/no-deploy call is made by **benchmark → gate**. `gate` only becomes

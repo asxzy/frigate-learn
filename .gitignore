@@ -20,3 +20,4 @@ golden/
 *.db-wal
 *.db-shm
 *.sqlite3
+data/previews/
