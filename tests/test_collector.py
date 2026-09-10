@@ -103,7 +103,7 @@ def _event(e_id: str, camera: str, label: str, start: float,
         "zones": [],
         "has_clip": True,
         "has_snapshot": True,
-        "box": box or [0.1, 0.2, 0.4, 0.8],
+        "box": box or [0.1, 0.2, 0.3, 0.6],
         "data": {"score": score},
     }
 

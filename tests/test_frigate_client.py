@@ -118,7 +118,7 @@ def test_get_event(mock_api):
                 "label": "person",
                 "start_time": 100.0,
                 "end_time": 160.0,
-                "box": [0.1, 0.2, 0.4, 0.8],
+                "box": [0.1, 0.2, 0.3, 0.6],
                 "data": {"score": 0.95},
             },
         )

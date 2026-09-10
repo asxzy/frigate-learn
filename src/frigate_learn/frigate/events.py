@@ -2,8 +2,9 @@
 
 The events endpoints return objects with (at least) ``id, camera, label,
 start_time, end_time, top_score, false_positive, zones, has_clip, has_snapshot,
-plus_id, sub_label, box, data``. ``box`` is a normalized ``[x1, y1, x2, y2]``
-list in [0,1] — this is the clean bbox source for collected samples.
+plus_id, sub_label, box, data``. As of Frigate 0.18 the box (``data.box``) is a
+normalized ``[x, y, w, h]`` list in [0,1] — parse_event normalizes it to
+``[x1, y1, x2, y2]`` so consumers never see the wh format.
 ``data`` holds ``score`` (final confidence), ``region``, etc.
 """
 
@@ -55,7 +56,8 @@ def _optional_box(value: Any) -> Box:
     box = tuple(_optional_float(v) for v in value)
     if any(v is None for v in box):
         return None
-    return box  # type: ignore[return-value]
+    x1, y1, w, h = box  # type: ignore[misc]
+    return (x1, y1, x1 + w, y1 + h)
 
 
 def parse_event(raw: Mapping[str, Any]) -> Event:

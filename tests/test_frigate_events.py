@@ -7,6 +7,19 @@ import pytest
 from frigate_learn.frigate.events import parse_event
 
 
+def test_parse_event_box_xywh_normalized_to_xyxy():
+    evt = parse_event(
+        {
+            "id": "e1",
+            "camera": "front",
+            "label": "person",
+            "start_time": 1.0,
+            "data": {"box": [0.3578125, 0.46527778, 0.05625, 0.05833333], "score": 0.9},
+        }
+    )
+    assert evt.box == pytest.approx((0.3578125, 0.46527778, 0.4140625, 0.52361111))
+
+
 def test_parse_event_box_from_raw():
     evt = parse_event(
         {
@@ -20,7 +33,7 @@ def test_parse_event_box_from_raw():
             "zones": ["home"],
             "has_clip": True,
             "has_snapshot": True,
-            "box": [0.1, 0.2, 0.4, 0.8],
+            "box": [0.1, 0.2, 0.3, 0.6],
             "data": {"score": 0.9},
         }
     )
