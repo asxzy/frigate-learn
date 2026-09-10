@@ -43,7 +43,7 @@ import json
 from frigate_learn.db import Database
 from frigate_learn.evaluation.benchmark import CandidateResult, results_to_json
 from frigate_learn.evaluation.metrics import DetectionMetrics
-from frigate_learn.models import Annotation, Deployment, Job, Sample
+from frigate_learn.models import Annotation, Deployment, Job, Sample, utcnow
 from frigate_learn.run import PIPELINE
 from frigate_learn.webapp import queries
 
@@ -638,4 +638,153 @@ def test_resolve_thumb_corrupt_image(tmp_path):
         ))
         session.commit()
     assert resolve_thumb(cfg, db, "corrupt") is None
+    db.dispose()
+
+
+# --- Background job manager tests ---
+
+
+import threading
+
+from frigate_learn import logutil
+from frigate_learn.run import StepReport
+from frigate_learn.webapp.jobs import JobManager, JobRunningError
+
+
+def _job_db(tmp_path) -> Database:
+    cfg = build_config({}, tmp_path)
+    db = Database(cfg.database_path())
+    db.init()
+    return cfg, db
+
+
+def _join_thread(manager, timeout=10):
+    manager._thread.join(timeout=timeout)
+
+
+def _finished_reports():
+    return [StepReport(name="collect", status="executed", message="ok")]
+
+
+def test_job_start_rejects_empty_or_unknown_steps(tmp_path):
+    cfg, db = _job_db(tmp_path)
+    manager = JobManager(cfg, db)
+    with pytest.raises(ValueError):
+        manager.start([])
+    with pytest.raises(ValueError):
+        manager.start(["bogus"])
+    db.dispose()
+
+
+def test_job_busy_raises_job_running_error(tmp_path, monkeypatch):
+    cfg, db = _job_db(tmp_path)
+    manager = JobManager(cfg, db)
+    event = threading.Event()
+
+    def _blocking_stub(config, db, **kwargs):
+        event.wait(timeout=10)
+        return _finished_reports()
+
+    monkeypatch.setattr("frigate_learn.webapp.jobs.run_pipeline", _blocking_stub)
+    first = manager.start(["collect"])
+    assert isinstance(first, str)
+    with pytest.raises(JobRunningError):
+        manager.start(["collect"])
+    event.set()
+    _join_thread(manager)
+    result = manager.get(first)
+    assert result["status"] == "finished"
+    assert result["error"] is None
+    assert result["reports"] == [{"name": "collect", "status": "executed", "message": "ok"}]
+    assert result["finished_at"] is not None
+    db.dispose()
+
+
+def test_job_failed_report_marks_job_failed(tmp_path, monkeypatch):
+    cfg, db = _job_db(tmp_path)
+    manager = JobManager(cfg, db)
+
+    def _failed_stub(config, db, **kwargs):
+        return [StepReport(name="collect", status="failed", message="boom")]
+
+    monkeypatch.setattr("frigate_learn.webapp.jobs.run_pipeline", _failed_stub)
+    job_id = manager.start(["collect"])
+    _join_thread(manager)
+    result = manager.get(job_id)
+    assert result["status"] == "failed"
+    assert result["error"] == "boom"
+    assert result["reports"] == [{"name": "collect", "status": "failed", "message": "boom"}]
+    db.dispose()
+
+
+def test_job_constructor_marks_stale_running_failed(tmp_path):
+    cfg, db = _job_db(tmp_path)
+    with db.session() as session:
+        session.add(Job(
+            id="stale1", type="pipeline", status="running", started_at=utcnow(),
+        ))
+        session.commit()
+    JobManager(cfg, db)
+    with db.session() as session:
+        stale = session.get(Job, "stale1")
+        assert stale.status == "failed"
+        assert stale.error == "terminated by server restart"
+    db.dispose()
+
+
+def test_job_log_tail_captures_logutil_lines(tmp_path, monkeypatch):
+    cfg, db = _job_db(tmp_path)
+    manager = JobManager(cfg, db)
+
+    def _logging_stub(config, db, **kwargs):
+        logutil.info("hello-job")
+        return _finished_reports()
+
+    monkeypatch.setattr("frigate_learn.webapp.jobs.run_pipeline", _logging_stub)
+    job_id = manager.start(["collect"])
+    _join_thread(manager)
+    result = manager.get(job_id)
+    assert any("hello-job" in line for line in result["log_tail"])
+    db.dispose()
+
+
+def test_job_recent_orders_by_started_at_desc_and_shapes(tmp_path):
+    cfg, db = _job_db(tmp_path)
+    long_tail = [f"line-{i}" for i in range(60)]
+    with db.session() as session:
+        session.add_all([
+            Job(
+                id="j_new", type="pipeline", status="failed",
+                started_at="2026-09-03T00:00:00+00:00",
+                finished_at="2026-09-03T00:01:00+00:00",
+                error="boom",
+                metadata_json=json.dumps({
+                    "steps": ["collect"], "dry_run": False,
+                    "reports": [{"name": "collect", "status": "failed", "message": "boom"}],
+                    "log_tail": long_tail,
+                }),
+            ),
+            Job(
+                id="j_mid", type="pipeline", status="finished",
+                started_at="2026-09-02T00:00:00+00:00",
+            ),
+            Job(
+                id="j_old", type="pipeline", status="finished",
+                started_at="2026-09-01T00:00:00+00:00",
+            ),
+        ])
+        session.commit()
+    manager = JobManager(cfg, db)
+    items = manager.recent(limit=2)
+    assert [i["id"] for i in items] == ["j_new", "j_mid"]
+    new = items[0]
+    assert new["type"] == "pipeline"
+    assert new["status"] == "failed"
+    assert new["error"] == "boom"
+    assert new["reports"] == [{"name": "collect", "status": "failed", "message": "boom"}]
+    assert new["log_tail"] == long_tail[-50:]
+    mid = items[1]
+    assert mid["reports"] == []
+    assert mid["log_tail"] == []
+    assert mid["error"] is None
     db.dispose()
