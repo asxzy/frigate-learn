@@ -7,7 +7,32 @@
   <link rel="stylesheet" href="/styles.css">
 </head>
 <body>
-  <main></main>
+  <div id="job-banner" class="job-banner" hidden>
+    <span class="spinner"></span>
+    <span>pipeline running</span>
+  </div>
+  <header class="topbar">
+    <h1>frigate-learn</h1>
+    <div id="stage-strip" class="stage-strip" aria-label="pipeline stages"></div>
+  </header>
+  <nav class="tabs">
+    <button class="tab active" data-view="overview" type="button">Overview</button>
+    <button class="tab" data-view="benchmark" type="button">Benchmark</button>
+    <button class="tab" data-view="quality" type="button">Quality</button>
+    <button class="tab" data-view="datasets" type="button">Datasets</button>
+    <button class="tab" data-view="training" type="button">Training</button>
+    <button class="tab" data-view="triage" type="button">Triage</button>
+  </nav>
+  <main>
+    <section id="view-overview" class="view"></section>
+    <section id="view-benchmark" class="view" hidden></section>
+    <section id="view-quality" class="view" hidden></section>
+    <section id="view-datasets" class="view" hidden></section>
+    <section id="view-training" class="view" hidden></section>
+    <section id="view-triage" class="view" hidden></section>
+  </main>
+  <div id="lightbox" class="lightbox" hidden></div>
+  <script src="/vendor/uPlot.iife.min.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

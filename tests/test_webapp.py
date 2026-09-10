@@ -6,6 +6,8 @@ import pytest
 
 pytest.importorskip("fastapi")
 
+from pathlib import Path
+
 from fastapi.testclient import TestClient
 
 from frigate_learn.config import build_config
@@ -40,12 +42,35 @@ def test_app_uses_default_config_without_arg(tmp_path, monkeypatch):
 
 import json
 
+import frigate_learn.webapp as webapp_pkg
 from frigate_learn.db import Database
 from frigate_learn.evaluation.benchmark import CandidateResult, results_to_json
 from frigate_learn.evaluation.metrics import DetectionMetrics
 from frigate_learn.models import Annotation, Deployment, Job, Sample, utcnow
 from frigate_learn.run import PIPELINE
 from frigate_learn.webapp import queries
+
+
+# --- Static SPA file wiring ---
+
+STATIC_DIR = Path(webapp_pkg.__file__).parent / "static"
+
+
+def test_index_html_references_app_scripts():
+    index = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
+    assert "/app.js" in index
+    assert "/vendor/uPlot.iife.min.js" in index
+
+
+def test_spa_static_files_exist():
+    assert (STATIC_DIR / "app.js").is_file()
+    assert (STATIC_DIR / "styles.css").is_file()
+    uplot = STATIC_DIR / "vendor" / "uPlot.iife.min.js"
+    assert uplot.is_file()
+    assert uplot.stat().st_size > 1024
+    header = uplot.read_bytes()[:256]
+    assert b"uPlot" in header
+
 
 REAL_CSV_HEADER = (
     "epoch,time,train/box_loss,train/cls_loss,train/dfl_loss,"
