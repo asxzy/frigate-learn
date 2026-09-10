@@ -76,7 +76,7 @@ def _metrics(map50, recall, latency_ms):
 def _seed_tree(tmp_path) -> None:
     data = tmp_path / "data"
     (data / "images").mkdir(parents=True)
-    (data / "images" / "a.jpg").write_bytes(b"fake-jpeg")
+    _make_jpeg(data / "images" / "a.jpg")
 
     golden = data / "golden" / "golden-v001"
     (golden / "images").mkdir(parents=True)
@@ -841,3 +841,271 @@ def test_job_concurrent_start_one_winner(tmp_path, monkeypatch):
     with db.session() as session:
         assert session.query(Job).filter(Job.status == "running").count() == 0
     db.dispose()
+
+
+# --- HTTP API tests ---
+
+
+import threading as _threading
+
+from frigate_learn.webapp.jobs import JobRunningError as _JRE
+
+
+def _api_client(tmp_path, monkeypatch=None):
+    _seed_tree(tmp_path)
+    cfg = build_config({"data": {"root": "data"}}, tmp_path)
+    db = Database(cfg.database_path())
+    db.init()
+    _seed_db(db, tmp_path / "data" / "images" / "a.jpg")
+    db.dispose()
+    if monkeypatch is not None:
+        def _noop_pipeline(config, db, *, steps=None, dry_run=False):
+            return [StepReport(name=steps[0] if steps else "collect", status="executed", message="ok")]
+        monkeypatch.setattr("frigate_learn.webapp.jobs.run_pipeline", _noop_pipeline)
+    app = create_app(cfg)
+    return TestClient(app, raise_server_exceptions=False), cfg
+
+
+def test_api_overview(tmp_path):
+    c, _ = _api_client(tmp_path)
+    r = c.get("/api/overview")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["steps"] == list(PIPELINE)
+    assert body["samples"]["total"] == 3
+
+
+def test_api_benchmark(tmp_path):
+    c, _ = _api_client(tmp_path)
+    r = c.get("/api/benchmark")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["golden"] == "golden-v001"
+    assert len(body["results"]) == 2
+
+
+def test_api_deployments(tmp_path):
+    c, _ = _api_client(tmp_path)
+    r = c.get("/api/deployments")
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["deployments"]) == 2
+    assert body["deployments"][0]["model_name"] == "yolov8n"
+
+
+def test_api_quality(tmp_path):
+    c, _ = _api_client(tmp_path)
+    r = c.get("/api/quality")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total"] == 3
+    assert body["verified"] == 1
+
+
+def test_api_datasets(tmp_path):
+    c, _ = _api_client(tmp_path)
+    r = c.get("/api/datasets")
+    assert r.status_code == 200
+    body = r.json()
+    assert "versions" in body
+    assert len(body["versions"]) == 2
+
+
+def test_api_training_list(tmp_path):
+    c, _ = _api_client(tmp_path)
+    r = c.get("/api/training/list")
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["runs"]) == 1
+    assert body["runs"][0]["run"] == "yolov8n-v001"
+
+
+def test_api_training_run(tmp_path):
+    c, _ = _api_client(tmp_path)
+    r = c.get("/api/training/yolov8n-v001")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["run"] == "yolov8n-v001"
+    assert body["epochs"] == 2
+
+
+def test_api_training_run_unknown(tmp_path):
+    c, _ = _api_client(tmp_path)
+    r = c.get("/api/training/does-not-exist")
+    assert r.status_code == 404
+
+
+def test_api_samples(tmp_path):
+    c, _ = _api_client(tmp_path)
+    r = c.get("/api/samples")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total"] == 3
+    assert len(body["samples"]) == 3
+    assert body["samples"][0]["id"] == "s1"
+
+
+def test_api_samples_filters(tmp_path):
+    c, _ = _api_client(tmp_path)
+    r = c.get("/api/samples?verified=1")
+    assert r.status_code == 200
+    assert r.json()["total"] == 1
+    r = c.get("/api/samples?quality=bad")
+    assert r.status_code == 200
+    assert r.json()["total"] == 1
+    r = c.get("/api/samples?camera=back")
+    assert r.status_code == 200
+    assert r.json()["total"] == 1
+    r = c.get("/api/samples?status=reviewed")
+    assert r.status_code == 200
+    assert r.json()["total"] == 1
+
+
+def test_api_sample_detail(tmp_path):
+    c, _ = _api_client(tmp_path)
+    r = c.get("/api/samples/s1")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["sample"]["id"] == "s1"
+    assert body["sample"]["has_image"] is True
+    assert body["sample"]["has_annotations"] is True
+
+
+def test_api_sample_detail_unknown(tmp_path):
+    c, _ = _api_client(tmp_path)
+    r = c.get("/api/samples/does-not-exist")
+    assert r.status_code == 404
+
+
+def test_api_jobs_recent(tmp_path):
+    c, _ = _api_client(tmp_path)
+    r = c.get("/api/jobs")
+    assert r.status_code == 200
+    body = r.json()
+    assert isinstance(body, list)
+    assert len(body) >= 1
+    assert body[0]["id"] == "j1"
+    assert body[0]["status"] == "finished"
+
+
+def test_api_jobs_get(tmp_path):
+    c, _ = _api_client(tmp_path)
+    r = c.get("/api/jobs/j1")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["id"] == "j1"
+    assert body["status"] == "finished"
+
+
+def test_api_jobs_get_unknown(tmp_path):
+    c, _ = _api_client(tmp_path)
+    r = c.get("/api/jobs/unknown-id")
+    assert r.status_code == 404
+
+
+def test_api_jobs_run_success(tmp_path, monkeypatch):
+    c, _ = _api_client(tmp_path, monkeypatch)
+    r = c.post("/api/jobs/run", json={"steps": ["build"], "dry_run": False})
+    assert r.status_code == 202
+    body = r.json()
+    assert "job_id" in body
+    job_id = body["job_id"]
+    r2 = c.get(f"/api/jobs/{job_id}")
+    assert r2.status_code == 200
+    assert r2.json()["status"] == "finished"
+
+
+def test_api_jobs_run_empty_steps(tmp_path, monkeypatch):
+    c, _ = _api_client(tmp_path, monkeypatch)
+    r = c.post("/api/jobs/run", json={"steps": []})
+    assert r.status_code == 422
+
+
+def test_api_jobs_run_unknown_step(tmp_path, monkeypatch):
+    c, _ = _api_client(tmp_path, monkeypatch)
+    r = c.post("/api/jobs/run", json={"steps": ["bogus"]})
+    assert r.status_code == 422
+
+
+def test_api_jobs_run_409(tmp_path, monkeypatch):
+    event = _threading.Event()
+
+    def _blocking_pipeline(config, db, *, steps=None, dry_run=False):
+        event.wait(timeout=10)
+        return [StepReport(name="collect", status="executed", message="ok")]
+
+    monkeypatch.setattr("frigate_learn.webapp.jobs.run_pipeline", _blocking_pipeline)
+    c, _ = _api_client(tmp_path)
+    r1 = c.post("/api/jobs/run", json={"steps": ["collect"], "dry_run": False})
+    assert r1.status_code == 202
+    r2 = c.post("/api/jobs/run", json={"steps": ["collect"], "dry_run": False})
+    assert r2.status_code == 409
+    assert r2.json()["detail"] == "a pipeline job is already running"
+    event.set()
+
+
+def test_api_samples_quality_valid(tmp_path, monkeypatch):
+    c, _ = _api_client(tmp_path, monkeypatch)
+    r = c.post("/api/samples/s1/quality", json={"quality": "bad"})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["sample"]["quality"] == "bad"
+    assert body["sample"]["id"] == "s1"
+
+
+def test_api_samples_quality_invalid(tmp_path, monkeypatch):
+    c, _ = _api_client(tmp_path, monkeypatch)
+    r = c.post("/api/samples/s1/quality", json={"quality": "invalid"})
+    assert r.status_code == 400
+
+
+def test_api_samples_quality_unknown_sample(tmp_path, monkeypatch):
+    c, _ = _api_client(tmp_path, monkeypatch)
+    r = c.post("/api/samples/does-not-exist/quality", json={"quality": "useful"})
+    assert r.status_code == 404
+
+
+def test_api_image(tmp_path, monkeypatch):
+    c, cfg = _api_client(tmp_path, monkeypatch)
+    r = c.get("/images/s1")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/jpeg"
+    assert int(r.headers["content-length"]) == len(r.content)
+    expected = (tmp_path / "data" / "images" / "a.jpg").read_bytes()
+    assert r.content == expected
+
+
+def test_api_image_thumb(tmp_path, monkeypatch):
+    c, cfg = _api_client(tmp_path, monkeypatch)
+    r = c.get("/images/s1/thumb")
+    assert r.status_code == 200
+    assert r.headers["content-type"] == "image/jpeg"
+    assert r.content[:2] == b"\xff\xd8"
+
+
+def test_api_image_unknown(tmp_path, monkeypatch):
+    c, _ = _api_client(tmp_path, monkeypatch)
+    r = c.get("/images/does-not-exist")
+    assert r.status_code == 404
+    assert r.json()["error"] == "not found"
+
+
+def test_api_image_thumb_unknown(tmp_path, monkeypatch):
+    c, _ = _api_client(tmp_path, monkeypatch)
+    r = c.get("/images/does-not-exist/thumb")
+    assert r.status_code == 404
+    assert r.json()["error"] == "not found"
+
+
+def test_api_image_no_file(tmp_path, monkeypatch):
+    c, _ = _api_client(tmp_path, monkeypatch)
+    r = c.get("/images/s2")
+    assert r.status_code == 404
+    assert r.json()["error"] == "not found"
+
+
+def test_api_image_thumb_no_file(tmp_path, monkeypatch):
+    c, _ = _api_client(tmp_path, monkeypatch)
+    r = c.get("/images/s2/thumb")
+    assert r.status_code == 404
+    assert r.json()["error"] == "not found"

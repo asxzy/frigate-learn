@@ -10,6 +10,7 @@ from fastapi.staticfiles import StaticFiles
 from ..config import AppConfig, load_config
 from ..db import Database
 from . import api
+from .jobs import JobManager
 
 
 def create_app(config: AppConfig | None = None) -> FastAPI:
@@ -22,6 +23,7 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app = FastAPI(title="frigate-learn", version="0.2.0")
     app.state.config = config
     app.state.db = db
+    app.state.jobs = JobManager(config, db)
     api.register_routes(app)
     static_dir = Path(__file__).parent / "static"
     app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")
