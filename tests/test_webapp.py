@@ -487,3 +487,155 @@ def test_empty_tree_returns_empty_shapes(tmp_path):
     assert queries.deployments(db)["deployments"] == []
     assert queries.samples(db) == {"total": 0, "limit": 50, "offset": 0, "samples": []}
     db.dispose()
+
+
+# --- Image serving tests ---
+
+
+from PIL import Image as PILImage
+
+from frigate_learn.webapp.serving import resolve_image, resolve_thumb
+
+
+def _make_jpeg(path: Path, *, w: int = 600, h: int = 400) -> None:
+    img = PILImage.new("RGB", (w, h), color=(255, 0, 0))
+    img.save(path, quality=90)
+
+
+def _serving_cfg(tmp_path):
+    return build_config({"data": {"root": "data"}}, tmp_path)
+
+
+def _serve_db(cfg):
+    db = Database(cfg.database_path())
+    db.init()
+    return db
+
+
+def test_resolve_image_present(tmp_path):
+    cfg = _serving_cfg(tmp_path)
+    img_dir = cfg.images_dir() / "nested"
+    img_dir.mkdir(parents=True)
+    img_path = img_dir / "a.jpg"
+    _make_jpeg(img_path)
+    db = _serve_db(cfg)
+    with db.session() as session:
+        session.add(Sample(
+            id="img1", camera="c", timestamp=1.0,
+            image_path=str(img_path), status="collected", verified=0,
+            created_at="2026-09-09T00:00:00+00:00",
+        ))
+        session.commit()
+    result = resolve_image(cfg, db, "img1")
+    assert result is not None
+    assert result == img_path
+    assert result.read_bytes() == img_path.read_bytes()
+    db.dispose()
+
+
+def test_resolve_image_missing_sample(tmp_path):
+    cfg = _serving_cfg(tmp_path)
+    db = _serve_db(cfg)
+    assert resolve_image(cfg, db, "nonexistent") is None
+    db.dispose()
+
+
+def test_resolve_image_traversal(tmp_path):
+    cfg = _serving_cfg(tmp_path)
+    db = _serve_db(cfg)
+    with db.session() as session:
+        session.add(Sample(
+            id="evil", camera="c", timestamp=1.0,
+            image_path="/etc/passwd", status="collected", verified=0,
+            created_at="2026-09-09T00:00:00+00:00",
+        ))
+        session.commit()
+    assert resolve_image(cfg, db, "evil") is None
+    db.dispose()
+
+
+def test_resolve_thumb_builds(tmp_path):
+    cfg = _serving_cfg(tmp_path)
+    img_dir = cfg.images_dir()
+    img_dir.mkdir(parents=True)
+    img_path = img_dir / "big.jpg"
+    _make_jpeg(img_path, w=800, h=600)
+    db = _serve_db(cfg)
+    with db.session() as session:
+        session.add(Sample(
+            id="t1", camera="c", timestamp=1.0,
+            image_path=str(img_path), status="collected", verified=0,
+            created_at="2026-09-09T00:00:00+00:00",
+        ))
+        session.commit()
+    result = resolve_thumb(cfg, db, "t1")
+    assert result is not None
+    assert result.exists()
+    assert result.suffix == ".jpg"
+    magic = result.read_bytes()[:2]
+    assert magic == b"\xff\xd8"
+    with PILImage.open(result) as thumb:
+        assert thumb.width <= 480
+    thumbs_dir = cfg.previews_dir() / "thumbs"
+    assert thumbs_dir.is_dir()
+    db.dispose()
+
+
+def test_resolve_thumb_cached(tmp_path):
+    cfg = _serving_cfg(tmp_path)
+    img_dir = cfg.images_dir()
+    img_dir.mkdir(parents=True)
+    img_path = img_dir / "cached.jpg"
+    _make_jpeg(img_path)
+    db = _serve_db(cfg)
+    with db.session() as session:
+        session.add(Sample(
+            id="t2", camera="c", timestamp=1.0,
+            image_path=str(img_path), status="collected", verified=0,
+            created_at="2026-09-09T00:00:00+00:00",
+        ))
+        session.commit()
+    first = resolve_thumb(cfg, db, "t2")
+    assert first is not None
+    mtime1 = first.stat().st_mtime_ns
+    second = resolve_thumb(cfg, db, "t2")
+    assert second == first
+    mtime2 = second.stat().st_mtime_ns
+    assert mtime1 == mtime2
+    db.dispose()
+
+
+def test_resolve_thumb_stale_returns_none(tmp_path):
+    cfg = _serving_cfg(tmp_path)
+    thumbs_dir = cfg.previews_dir() / "thumbs"
+    thumbs_dir.mkdir(parents=True)
+    stale = thumbs_dir / "gone.jpg"
+    stale.write_bytes(b"\xff\xd8\xff\xe0")
+    db = _serve_db(cfg)
+    with db.session() as session:
+        session.add(Sample(
+            id="gone", camera="c", timestamp=1.0,
+            image_path="/nonexistent/path.jpg", status="collected", verified=0,
+            created_at="2026-09-09T00:00:00+00:00",
+        ))
+        session.commit()
+    assert resolve_thumb(cfg, db, "gone") is None
+    db.dispose()
+
+
+def test_resolve_thumb_corrupt_image(tmp_path):
+    cfg = _serving_cfg(tmp_path)
+    img_dir = cfg.images_dir()
+    img_dir.mkdir(parents=True)
+    bad = img_dir / "bad.jpg"
+    bad.write_text("not an image", encoding="utf-8")
+    db = _serve_db(cfg)
+    with db.session() as session:
+        session.add(Sample(
+            id="corrupt", camera="c", timestamp=1.0,
+            image_path=str(bad), status="collected", verified=0,
+            created_at="2026-09-09T00:00:00+00:00",
+        ))
+        session.commit()
+    assert resolve_thumb(cfg, db, "corrupt") is None
+    db.dispose()
