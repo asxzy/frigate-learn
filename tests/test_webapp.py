@@ -434,6 +434,26 @@ def test_training_run_missing_map50_column(tmp_path):
     assert result["epochs"] == 1
 
 
+def test_training_run_nan_empty_inf_become_none(tmp_path):
+    cfg = build_config({"data": {"root": "data"}}, tmp_path)
+    run_dir = tmp_path / "data" / "training" / "yolov8n-vnan"
+    run_dir.mkdir(parents=True)
+    (run_dir / "results.csv").write_text(
+        "epoch,metrics/mAP50(B),metrics/recall(B)\n"
+        "1,nan,nan\n"
+        "2,,\n"
+        "3,inf,0.7\n",
+        encoding="utf-8",
+    )
+    result = queries.training_run(cfg, "yolov8n-vnan")
+    assert result["epochs"] == 3
+    assert result["rows"][0]["metrics/recall(B)"] is None
+    assert result["rows"][1]["metrics/mAP50(B)"] is None
+    assert result["rows"][2]["metrics/mAP50(B)"] is None
+    assert result["best_map50"] is None
+    assert result["latest_map50"] is None
+
+
 def test_samples_all(seeded):
     _, db = seeded
     result = queries.samples(db)
@@ -976,6 +996,21 @@ def test_api_training_run(tmp_path):
     body = r.json()
     assert body["run"] == "yolov8n-v001"
     assert body["epochs"] == 2
+
+
+def test_api_training_run_with_nan_returns_200(tmp_path):
+    c, _ = _api_client(tmp_path)
+    run_dir = tmp_path / "data" / "training" / "yolov8n-vnan"
+    (run_dir / "weights").mkdir(parents=True)
+    (run_dir / "results.csv").write_text(
+        "epoch,metrics/mAP50(B),metrics/recall(B)\n1,0.5,nan\n2,,\n",
+        encoding="utf-8",
+    )
+    r = c.get("/api/training/yolov8n-vnan")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["rows"][0]["metrics/recall(B)"] is None
+    assert body["rows"][1]["metrics/mAP50(B)"] is None
 
 
 def test_api_training_run_unknown(tmp_path):

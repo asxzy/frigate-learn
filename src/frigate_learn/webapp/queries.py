@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import csv
 import json
+import math
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -375,9 +376,10 @@ def _to_float_or_str(value: str | None) -> float | str | None:
     if value is None or value == "":
         return None
     try:
-        return float(value)
+        parsed = float(value)
     except ValueError:
         return value
+    return parsed if math.isfinite(parsed) else None
 
 
 def _read_csv(path: Path) -> tuple[list[str], list[dict]]:

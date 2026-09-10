@@ -146,8 +146,8 @@ function renderLineChart(container, xs, series) {
     axes: [ { label: "epoch" }, {} ],
     series: [
       {},
-      { label: series[0].label, stroke: series[0].color, width: 2, points: { show: false } },
-      { label: series[1].label, stroke: series[1].color, width: 2, points: { show: false } },
+      { label: series[0].label, stroke: series[0].color, width: 2, spanGaps: true, points: { show: false } },
+      { label: series[1].label, stroke: series[1].color, width: 2, spanGaps: true, points: { show: false } },
     ],
   };
   charts.push(new uPlot(opts, [xs, series[0].data, series[1].data], container));
@@ -576,10 +576,10 @@ async function renderTrainingDetail(sec, run) {
     const e = Number(row.epoch);
     if (!Number.isFinite(e)) continue;
     xs.push(e);
-    const m = Number(row[MAP50_KEY]);
-    const r = Number(row[RECALL_KEY]);
-    map.push(Number.isFinite(m) ? m : null);
-    rec.push(Number.isFinite(r) ? r : null);
+    const m = row[MAP50_KEY];
+    const r = row[RECALL_KEY];
+    map.push((m === null || m === undefined || m === "" || !Number.isFinite(Number(m))) ? null : Number(m));
+    rec.push((r === null || r === undefined || r === "" || !Number.isFinite(Number(r))) ? null : Number(r));
   }
   renderLineChart(plotBox(sec), xs, [
     { label: "mAP50", color: "#56c7ff", data: map },
