@@ -45,7 +45,7 @@ def _seed_sample(config, db, tmp_path, sample_id="s1"):
             Annotation(
                 id=f"a{sample_id}", sample_id=sample_id, source="frigate",
                 label="person", x1=0.1, y1=0.1, x2=0.6, y2=0.8,
-                confidence=0.9, verified=0, created_at=utcnow(),
+                confidence=0.9, verified=1, created_at=utcnow(),
             )
         )
         s.commit()

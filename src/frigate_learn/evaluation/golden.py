@@ -174,13 +174,22 @@ class GoldenDataset:
         return problems
 
 
-def write_dataset_yaml(path: Path, class_names: list[str]) -> None:
+def write_dataset_yaml(
+    path: Path,
+    class_names: list[str],
+    *,
+    train: str = "images",
+    val: str = "images",
+    test: str | None = None,
+) -> None:
     payload = {
         "path": str(path.parent),
-        "train": "images",
-        "val": "images",
+        "train": train,
+        "val": val,
         "names": {i: name for i, name in enumerate(class_names)},
     }
+    if test is not None:
+        payload["test"] = test
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
 

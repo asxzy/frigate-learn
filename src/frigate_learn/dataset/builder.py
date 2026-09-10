@@ -5,8 +5,8 @@ Builds a frozen, reproducible training dataset from the SQLite pool into
 
 ````
 datasets/<version>/
-├── images/            <sample_id>.<ext>
-├── labels/            <sample_id>.txt   (YOLO class cx cy w h)
+├── images/            <split>/<sample_id>.<ext>   (split in train|val|test)
+├── labels/            <split>/<sample_id>.txt   (YOLO class cx cy w h)
 ├── train.txt | val.txt | test.txt        (deterministic split assignment)
 ├── dataset.yaml
 ├── build.json         (parameters that produced this build)
@@ -61,7 +61,7 @@ class DatasetBuilder:
         cameras: list[str] | None = None,
         labels: list[str] | None = None,
         quality: str | None = None,
-        verified_only: bool = False,
+        verified_only: bool = True,
         max_per_class: int | None = None,
         seed: str | None = None,
         overwrite: bool = False,
@@ -80,8 +80,9 @@ class DatasetBuilder:
 
         images_dir = target / "images"
         labels_dir = target / "labels"
-        images_dir.mkdir(parents=True, exist_ok=True)
-        labels_dir.mkdir(parents=True, exist_ok=True)
+        for split in VALID_SPLITS:
+            (images_dir / split).mkdir(parents=True, exist_ok=True)
+            (labels_dir / split).mkdir(parents=True, exist_ok=True)
 
         cap_counts: dict[str, int] = {}
 
@@ -123,7 +124,8 @@ class DatasetBuilder:
                 continue
 
             ext = source_path.suffix.lower() or ".jpg"
-            image_dst = images_dir / f"{sample.id}{ext}"
+            split = assign_split(sample.id, seed=split_seed)
+            image_dst = images_dir / split / f"{sample.id}{ext}"
             try:
                 shutil.copy2(source_path, image_dst)
             except OSError:
@@ -131,9 +133,8 @@ class DatasetBuilder:
                 continue
 
             lines = [_to_yolo_line(a, class_id) for a in usable]
-            write_yolo_label(labels_dir / f"{sample.id}.txt", lines)
+            write_yolo_label(labels_dir / split / f"{sample.id}.txt", lines)
 
-            split = assign_split(sample.id, seed=split_seed)
             summary.split_counts[split] = summary.split_counts.get(split, 0) + 1
             if sample.verified:
                 summary.verified += 1
@@ -155,7 +156,13 @@ class DatasetBuilder:
 
         from ..evaluation.golden import write_dataset_yaml as _write_dataset_yaml
 
-        _write_dataset_yaml(target / "dataset.yaml", classes)
+        _write_dataset_yaml(
+            target / "dataset.yaml",
+            classes,
+            train="images/train",
+            val="images/val",
+            test="images/test",
+        )
         self._write_split_files(target)
         self._write_build_json(
             target / "build.json",
@@ -222,7 +229,8 @@ class DatasetBuilder:
     def _write_split_files(target: Path) -> None:
         splits: dict[str, list[str]] = {s: [] for s in VALID_SPLITS}
         for rec in iter_manifest(target / "manifest.jsonl"):
-            splits.setdefault(rec.get("split", "train"), []).append(f"images/{rec['image']}")
+            split = rec.get("split", "train")
+            splits.setdefault(split, []).append(f"images/{split}/{rec['image']}")
         for split, lines in splits.items():
             if not lines:
                 continue

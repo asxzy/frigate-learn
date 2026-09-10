@@ -455,7 +455,7 @@ def dataset() -> None:
 @click.option("--camera", "cameras", multiple=True)
 @click.option("--label", "labels", multiple=True)
 @click.option("--quality", default=None, help="Only samples with this verdict (default: useful/unset).")
-@click.option("--verified-only", is_flag=True, help="Only samples with a verified annotation.")
+@click.option("--include-unverified", is_flag=True, help="Also write samples labeled only by Frigate (default: verified-only).")
 @click.option("--max-per-class", type=int, default=None)
 @click.option("--seed", default=None)
 @click.option("--overwrite", is_flag=True)
@@ -466,7 +466,7 @@ def dataset_build(
     cameras: tuple[str, ...],
     labels: tuple[str, ...],
     quality: str | None,
-    verified_only: bool,
+    include_unverified: bool,
     max_per_class: int | None,
     seed: str | None,
     overwrite: bool,
@@ -482,7 +482,7 @@ def dataset_build(
         cameras=list(cameras) or None,
         labels=list(labels) or None,
         quality=quality,
-        verified_only=verified_only,
+        verified_only=not include_unverified,
         max_per_class=max_per_class,
         seed=seed,
         overwrite=overwrite,
