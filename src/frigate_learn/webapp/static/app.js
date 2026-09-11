@@ -142,15 +142,21 @@ function renderLineChart(container, xs, series) {
   const opts = {
     width, height: 340,
     legend: { show: true },
-    scales: { x: { time: false }, y: {} },
+    scales: { x: { time: false }, y: { auto: false, range: [0, 1] } },
     axes: [ { label: "epoch" }, {} ],
     series: [
       {},
-      { label: series[0].label, stroke: series[0].color, width: 2, spanGaps: true, points: { show: false } },
-      { label: series[1].label, stroke: series[1].color, width: 2, spanGaps: true, points: { show: false } },
+      ...series.map((s) => ({
+        label: s.label,
+        stroke: s.color,
+        width: s.width === undefined ? 2 : s.width,
+        dash: s.dash || [],
+        spanGaps: true,
+        points: { show: false },
+      })),
     ],
   };
-  charts.push(new uPlot(opts, [xs, series[0].data, series[1].data], container));
+  charts.push(new uPlot(opts, [xs, ...series.map((s) => s.data)], container));
 }
 
 const views = {
@@ -566,9 +572,18 @@ async function renderTrainingDetail(sec, run) {
   cards.appendChild(countCard("Best mAP50", num(data.best_map50) || "—", `dataset ${data.dataset}`));
   cards.appendChild(countCard("Latest mAP50", num(data.latest_map50) || "—", `${data.epochs} epochs`));
   cards.appendChild(countCard("Weights", data.weights_exists ? "present" : "absent", "weights/best.pt"));
+  const ba = data.before_after;
+  const beforeMap50 = ba && ba.before ? ba.before.map50 : null;
+  const afterMap50 = ba && ba.after ? ba.after.map50 : null;
+  cards.appendChild(countCard("Golden before", num(beforeMap50) || "—", "pretrained · golden"));
+  cards.appendChild(countCard("Golden after", num(afterMap50) || "—", "fine-tuned · golden"));
+  if (beforeMap50 !== null && afterMap50 !== null) {
+    const delta = afterMap50 - beforeMap50;
+    cards.appendChild(countCard("Golden Δ", (delta >= 0 ? "+" : "") + num(delta), "after − before"));
+  }
   sec.appendChild(cards);
 
-  sec.appendChild(tableCaption("Epoch curves"));
+  sec.appendChild(tableCaption("Epoch curves · val set per epoch · dashed = golden before/after"));
   const xs = [];
   const map = [];
   const rec = [];
@@ -581,10 +596,13 @@ async function renderTrainingDetail(sec, run) {
     map.push((m === null || m === undefined || m === "" || !Number.isFinite(Number(m))) ? null : Number(m));
     rec.push((r === null || r === undefined || r === "" || !Number.isFinite(Number(r))) ? null : Number(r));
   }
-  renderLineChart(plotBox(sec), xs, [
+  const series = [
     { label: "mAP50", color: "#56c7ff", data: map },
     { label: "recall", color: "#56d364", data: rec },
-  ]);
+  ];
+  if (beforeMap50 !== null) series.push({ label: "golden before", color: "#8b949e", width: 1, dash: [6, 4], data: xs.map(() => beforeMap50) });
+  if (afterMap50 !== null) series.push({ label: "golden after", color: "#d29922", width: 1, dash: [6, 4], data: xs.map(() => afterMap50) });
+  renderLineChart(plotBox(sec), xs, series);
   return data;
 }
 
