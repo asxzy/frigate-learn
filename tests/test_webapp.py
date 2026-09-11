@@ -454,6 +454,70 @@ def test_training_run_nan_empty_inf_become_none(tmp_path):
     assert result["latest_map50"] is None
 
 
+def test_training_run_before_after(tmp_path):
+    cfg = build_config({"data": {"root": "data"}}, tmp_path)
+    run_dir = tmp_path / "data" / "training" / "yolov8n-vba"
+    run_dir.mkdir(parents=True)
+    (run_dir / "results.csv").write_text(
+        "epoch,metrics/mAP50(B)\n1,0.5\n", encoding="utf-8"
+    )
+    (run_dir / "before_after.json").write_text(
+        json.dumps(
+            {
+                "before": {"map50": 0.333, "recall": 0.417, "latency_ms": 15.3},
+                "after": {"map50": 0.333, "recall": 0.083, "latency_ms": 14.5},
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = queries.training_run(cfg, "yolov8n-vba")
+    assert result["before_after"] == {
+        "before": {"map50": 0.333, "recall": 0.417, "latency_ms": 15.3},
+        "after": {"map50": 0.333, "recall": 0.083, "latency_ms": 14.5},
+    }
+
+
+def test_training_run_before_after_missing(seeded):
+    cfg, _ = seeded
+    result = queries.training_run(cfg, "yolov8n-v001")
+    assert result["before_after"] is None
+
+
+def test_training_run_before_after_corrupt(tmp_path):
+    cfg = build_config({"data": {"root": "data"}}, tmp_path)
+    run_dir = tmp_path / "data" / "training" / "yolov8n-vbad"
+    run_dir.mkdir(parents=True)
+    (run_dir / "results.csv").write_text(
+        "epoch,metrics/mAP50(B)\n1,0.5\n", encoding="utf-8"
+    )
+    (run_dir / "before_after.json").write_text("{not json", encoding="utf-8")
+    result = queries.training_run(cfg, "yolov8n-vbad")
+    assert result["before_after"] is None
+
+
+def test_training_run_before_after_nonfinite_dropped(tmp_path):
+    cfg = build_config({"data": {"root": "data"}}, tmp_path)
+    run_dir = tmp_path / "data" / "training" / "yolov8n-vnf"
+    run_dir.mkdir(parents=True)
+    (run_dir / "results.csv").write_text(
+        "epoch,metrics/mAP50(B)\n1,0.5\n", encoding="utf-8"
+    )
+    (run_dir / "before_after.json").write_text(
+        json.dumps(
+            {
+                "before": {"map50": float("nan"), "recall": 0.4},
+                "after": {"map50": 0.3, "recall": float("inf")},
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = queries.training_run(cfg, "yolov8n-vnf")
+    assert result["before_after"] == {
+        "before": {"map50": None, "recall": 0.4, "latency_ms": None},
+        "after": {"map50": 0.3, "recall": None, "latency_ms": None},
+    }
+
+
 def test_samples_all(seeded):
     _, db = seeded
     result = queries.samples(db)

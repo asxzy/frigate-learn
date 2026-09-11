@@ -211,6 +211,7 @@ def training_run(config, run) -> dict | None:
     columns, rows = _read_csv(results_csv)
     map50s = [r[MAP50_KEY] for r in rows if r.get(MAP50_KEY) is not None]
     _, tag = _split_run(run)
+    run_dir = results_csv.parent
     return {
         "run": run,
         "columns": columns,
@@ -218,7 +219,8 @@ def training_run(config, run) -> dict | None:
         "best_map50": max(map50s) if map50s else None,
         "latest_map50": map50s[-1] if map50s else None,
         "epochs": len(rows),
-        "weights_exists": (results_csv.parent / "weights" / "best.pt").is_file(),
+        "weights_exists": (run_dir / "weights" / "best.pt").is_file(),
+        "before_after": _read_before_after(run_dir),
         "dataset": tag,
     }
 
@@ -380,6 +382,37 @@ def _to_float_or_str(value: str | None) -> float | str | None:
     except ValueError:
         return value
     return parsed if math.isfinite(parsed) else None
+
+
+def _read_before_after(run_dir: Path) -> dict | None:
+    path = run_dir / "before_after.json"
+    if not path.is_file():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    def _segment(key: str) -> dict | None:
+        seg = payload.get(key)
+        if not isinstance(seg, dict):
+            return None
+        out: dict[str, float | None] = {}
+        for metric in ("map50", "recall", "latency_ms"):
+            value = seg.get(metric)
+            if isinstance(value, (int, float)) and math.isfinite(value):
+                out[metric] = float(value)
+            else:
+                out[metric] = None
+        return out
+
+    before = _segment("before")
+    after = _segment("after")
+    if before is None or after is None:
+        return None
+    return {"before": before, "after": after}
 
 
 def _read_csv(path: Path) -> tuple[list[str], list[dict]]:
