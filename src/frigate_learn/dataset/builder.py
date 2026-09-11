@@ -73,6 +73,11 @@ class DatasetBuilder:
                 f"dataset version {version!r} already exists at {target}; "
                 "pick a new version or pass overwrite=True"
             )
+        if target.exists() and overwrite:
+            if target.is_dir():
+                shutil.rmtree(target)
+            else:
+                target.unlink()
 
         classes = list(self.config.classes)
         class_id = {name: i for i, name in enumerate(classes)}

@@ -63,3 +63,16 @@ def test_builder_writes_split_directories(config, db, tmp_path):
     assert "val: images/val" in yaml_text
     assert "test: images/test" in yaml_text
     assert f"images/{split}/s1.jpg" in (target / f"{split}.txt").read_text(encoding="utf-8")
+
+
+def test_builder_overwrite_recreates_version(config, db, tmp_path):
+    _seed_sample(config, db)
+    target = config.datasets_dir() / "v001"
+    DatasetBuilder(config, db).build("v001")
+    stale = target / "stale.txt"
+    stale.write_text("x", encoding="utf-8")
+    summary = DatasetBuilder(config, db).build("v001", overwrite=True)
+    assert summary.images_written == 1
+    records = list(iter_manifest(target / "manifest.jsonl"))
+    assert len(records) == 1
+    assert not stale.exists()
