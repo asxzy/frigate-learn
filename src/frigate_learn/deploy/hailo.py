@@ -140,6 +140,7 @@ def deploy(
         else:
             onnx_path = export_onnx(Path(weights), models_dir, imgsz=imgsz)
     hef_path = compile_hailo(onnx_path, models_dir, dry_run=dry_run)
+    model_classes = config.model_class_names()
 
     manifest = models_dir / "manifest.json"
     manifest.write_text(
@@ -150,13 +151,15 @@ def deploy(
         f'  "onnx": "{onnx_path.name}",\n'
         f'  "hef": "{hef_path.name}",\n'
         f'  "hef_sha256": "{_sha256(hef_path)}",\n'
+        f'  "label_space": "{config.training.label_space}",\n'
+        f'  "num_classes": {len(model_classes)},\n'
         f'  "dry_run": {"true" if dry_run else "false"}\n'
         "}\n",
         encoding="utf-8",
     )
 
     snippet = render_frigate_detector_config(
-        model_name, hef_path.name, config.classes, imgsz=imgsz
+        model_name, hef_path.name, model_classes, imgsz=imgsz
     )
     (models_dir / "frigate-detector.yml").write_text(snippet, encoding="utf-8")
 

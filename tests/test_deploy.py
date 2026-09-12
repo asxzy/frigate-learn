@@ -113,6 +113,52 @@ def test_deploy_dry_run_writes_manifest_and_hef(config, db, tmp_path):
     assert "type: hailo" in snippet
 
 
+def test_render_coco80_num_classes_80(config):
+    snippet = render_frigate_detector_config(
+        "m", "m.hef", config.model_class_names(), imgsz=320
+    )
+    assert "num_classes: 80" in snippet
+
+
+def test_deploy_manifest_label_space_and_num_classes(config, db, tmp_path):
+    weights = tmp_path / "best.pt"
+    weights.write_text("# fake weights", encoding="utf-8")
+
+    outcome = deploy(
+        config, db,
+        model_name="yolov8n-coco80",
+        weights=weights,
+        version="v001",
+        dry_run=True,
+        out_dir=tmp_path / "models" / "yolov8n-coco80",
+    )
+    manifest = json.loads(outcome.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["label_space"] == "coco80"
+    assert manifest["num_classes"] == 80
+    snippet = (outcome.manifest_path.parent / "frigate-detector.yml").read_text(encoding="utf-8")
+    assert "num_classes: 80" in snippet
+
+
+def test_deploy_subset_compact(config, db, tmp_path):
+    config.training.label_space = "subset"
+    weights = tmp_path / "best.pt"
+    weights.write_text("# fake weights", encoding="utf-8")
+
+    outcome = deploy(
+        config, db,
+        model_name="yolov8n-subset",
+        weights=weights,
+        version="v001",
+        dry_run=True,
+        out_dir=tmp_path / "models" / "yolov8n-subset",
+    )
+    manifest = json.loads(outcome.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["label_space"] == "subset"
+    assert manifest["num_classes"] == len(config.classes)
+    snippet = (outcome.manifest_path.parent / "frigate-detector.yml").read_text(encoding="utf-8")
+    assert f"num_classes: {len(config.classes)}" in snippet
+
+
 def test_deploy_records_deployment_row_when_gate_given(config, db, tmp_path):
     weights = tmp_path / "best.pt"
     weights.write_text("# fake", encoding="utf-8")
