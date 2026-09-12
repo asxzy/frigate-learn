@@ -171,28 +171,58 @@ class Trainer:
             return self._dry_run_result(candidate.weights, dataset_version, run_dir, tag=tag)
 
         try:
-            from ultralytics import YOLO  # lazy import
+            if cfg.label_space == "coco80":
+                from .masked import MaskedDetectionTrainer
 
-            model = YOLO(candidate.weights)
-            kwargs: dict = {
-                "seed": seed,
-            }
-            if device is not None:
-                kwargs["device"] = device
-            if freeze is not None:
-                kwargs["freeze"] = freeze
-            results = model.train(
-                data=str(dataset_yaml),
-                epochs=epochs,
-                imgsz=imgsz,
-                batch=batch,
-                project=str(project),
-                name=name,
-                exist_ok=True,
-                **kwargs,
-            )
-            best = Path(getattr(results, "save_dir", run_dir)) / "weights" / "best.pt"
-            metrics = dict(getattr(results, "results_dict", {}) or {})
+                trainable = self.config.trainable_class_mask()
+                overrides: dict = {
+                    "model": str(candidate.weights),
+                    "data": str(dataset_yaml),
+                    "epochs": epochs,
+                    "imgsz": imgsz,
+                    "batch": batch,
+                    "project": str(project),
+                    "name": name,
+                    "exist_ok": True,
+                    "seed": seed,
+                }
+                if device is not None:
+                    overrides["device"] = device
+                if freeze is not None:
+                    overrides["freeze"] = freeze
+                if cfg.lr0 is not None:
+                    overrides["lr0"] = cfg.lr0
+                if cfg.lrf is not None:
+                    overrides["lrf"] = cfg.lrf
+                trainer = MaskedDetectionTrainer(
+                    overrides=overrides, trainable=trainable
+                )
+                trainer.train()
+                best = Path(trainer.best)
+                metrics = dict(trainer.metrics or {})
+            else:
+                from ultralytics import YOLO
+
+                model = YOLO(candidate.weights)
+                kwargs: dict = {
+                    "seed": seed,
+                }
+                if device is not None:
+                    kwargs["device"] = device
+                if freeze is not None:
+                    kwargs["freeze"] = freeze
+                results = model.train(
+                    data=str(dataset_yaml),
+                    epochs=epochs,
+                    imgsz=imgsz,
+                    batch=batch,
+                    project=str(project),
+                    name=name,
+                    exist_ok=True,
+                    **kwargs,
+                )
+                best = Path(getattr(results, "save_dir", run_dir)) / "weights" / "best.pt"
+                metrics = dict(getattr(results, "results_dict", {}) or {})
             if best.exists():
                 _safe_before_after(
                     self.config, str(candidate.weights), str(best), run_dir, name=name
