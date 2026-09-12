@@ -16,6 +16,8 @@ from typing import Any
 
 import yaml
 
+from .classes import COCO_80, coco_index, trainable_mask
+
 Env = dict[str, str]
 
 _ENV_TOKEN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(:-([^}]*))?\}|\$([A-Za-z_][A-Za-z0-9_]*)")
@@ -94,6 +96,9 @@ class TrainingSettings:
     freeze: int | None = None
     project: str | None = None    # output dir for runs (default: data/training)
     seed: int = 1234
+    label_space: str = "coco80"
+    lr0: float | None = None
+    lrf: float | None = None
 
 
 @dataclass
@@ -171,6 +176,16 @@ class AppConfig:
 
     def migrations_dir(self) -> Path:
         return self.resolve(self.data.migrations)
+
+    def model_class_names(self) -> list[str]:
+        if self.training.label_space == "coco80":
+            return list(COCO_80)
+        return list(self.classes)
+
+    def trainable_class_mask(self) -> list[bool] | None:
+        if self.training.label_space != "coco80":
+            return None
+        return trainable_mask(len(COCO_80), self.classes)
 
 
 def _interpolate(value: str, env: Env) -> str:
@@ -307,6 +322,24 @@ def build_config(raw: dict[str, Any], base_dir: Path) -> AppConfig:
     cfg.training.freeze = _as_optional_int(_pop(tr, "freeze", None))
     cfg.training.project = _pop(tr, "project", None)
     cfg.training.seed = int(_pop(tr, "seed", cfg.training.seed))
+    cfg.training.label_space = str(_pop(tr, "label_space", cfg.training.label_space))
+    cfg.training.lr0 = _as_optional_float(_pop(tr, "lr0", None))
+    cfg.training.lrf = _as_optional_float(_pop(tr, "lrf", None))
+
+    if cfg.training.label_space not in ("coco80", "subset"):
+        raise ValueError(
+            f"unknown training.label_space {cfg.training.label_space!r}; "
+            "expected 'coco80' or 'subset'"
+        )
+    if cfg.training.label_space == "coco80":
+        offenders = []
+        for name in cfg.classes:
+            try:
+                coco_index(name)
+            except ValueError:
+                offenders.append(name)
+        if offenders:
+            raise ValueError(f"classes not in COCO-80 under label_space=coco80: {offenders}")
 
     ev = _section(raw, "evaluation")
     cfg.evaluation.golden_dataset = str(_pop(ev, "golden_dataset", cfg.evaluation.golden_dataset))

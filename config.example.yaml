@@ -84,6 +84,11 @@ training:
   freeze: null                # freeze first N backbone layers (usually null/10)
   project: null               # output dir for runs (default: data/training)
   seed: 1234
+  # coco80: keep the full COCO-80 label head, freeze the 72 non-configured classes.
+  #         subset: compact head over the configured classes (legacy).
+  label_space: coco80
+  lr0: null                   # initial LR override; null -> trainer default
+  lrf: null                   # final LR factor override; null -> trainer default
 
 evaluation:
   golden_dataset: "golden-v001"

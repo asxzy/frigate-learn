@@ -25,6 +25,7 @@ def test_defaults():
     assert "person" in cfg.classes
     assert cfg.collection.region_crop is True
     assert cfg.collection.region_crop_height is None
+    assert cfg.training.label_space == "coco80"
 
 
 def test_build_config_maps_sections():
@@ -105,3 +106,68 @@ def test_frigate_defaults_dataclass():
     f = FrigateSettings()
     assert f.completed_events_only is True
     assert f.max_retries == 3
+
+
+def test_training_label_space_default_coco80():
+    cfg = AppConfig()
+    assert cfg.training.label_space == "coco80"
+    assert cfg.training.lr0 is None
+    assert cfg.training.lrf is None
+
+
+def test_build_config_label_space_subset():
+    cfg = build_config({"training": {"label_space": "subset"}}, base_dir=Path("/tmp/x"))
+    assert cfg.training.label_space == "subset"
+
+
+def test_build_config_invalid_label_space_raises():
+    with pytest.raises(ValueError):
+        build_config({"training": {"label_space": "bbox"}}, base_dir=Path("/tmp/x"))
+
+
+def test_build_config_lr_overrides():
+    cfg = build_config(
+        {"training": {"lr0": 0.001, "lrf": 0.01}}, base_dir=Path("/tmp/x")
+    )
+    assert cfg.training.lr0 == 0.001
+    assert cfg.training.lrf == 0.01
+    cfg = build_config({"training": {"lr0": "", "lrf": ""}}, base_dir=Path("/tmp/x"))
+    assert cfg.training.lr0 is None
+    assert cfg.training.lrf is None
+
+
+def test_model_class_names_coco80():
+    names = AppConfig().model_class_names()
+    assert len(names) == 80
+    assert names[0] == "person"
+    assert names[2] == "car"
+    assert names[15] == "cat"
+    assert names[16] == "dog"
+
+
+def test_model_class_names_subset_matches_classes():
+    cfg = build_config(
+        {"classes": ["person", "car"], "training": {"label_space": "subset"}},
+        base_dir=Path("/tmp/x"),
+    )
+    assert cfg.model_class_names() == ["person", "car"]
+
+
+def test_trainable_class_mask_coco80():
+    mask = AppConfig().trainable_class_mask()
+    assert len(mask) == 80
+    assert sum(mask) == 8
+    for i in [0, 1, 2, 3, 5, 7, 15, 16]:
+        assert mask[i] is True
+    for i in [4, 79]:
+        assert mask[i] is False
+
+
+def test_trainable_class_mask_subset_is_none():
+    cfg = build_config({"training": {"label_space": "subset"}}, base_dir=Path("/tmp/x"))
+    assert cfg.trainable_class_mask() is None
+
+
+def test_coco80_rejects_non_coco_class():
+    with pytest.raises(ValueError, match="deer"):
+        build_config({"classes": ["person", "deer"]}, base_dir=Path("/tmp/x"))
