@@ -339,7 +339,9 @@ def build_config(raw: dict[str, Any], base_dir: Path) -> AppConfig:
             except ValueError:
                 offenders.append(name)
         if offenders:
-            raise ValueError(f"classes not in COCO-80 under label_space=coco80: {offenders}")
+            raise ValueError(
+                f"classes not in COCO-80 under label_space=coco80: {offenders}"
+            )
 
     ev = _section(raw, "evaluation")
     cfg.evaluation.golden_dataset = str(_pop(ev, "golden_dataset", cfg.evaluation.golden_dataset))
