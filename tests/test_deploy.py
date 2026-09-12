@@ -11,6 +11,7 @@ from frigate_learn.deploy.hailo import (
     HailoCompilerMissing,
     compile_hailo,
     deploy,
+    export_onnx,
     render_frigate_detector_config,
 )
 from frigate_learn.evaluation.benchmark import CandidateResult
@@ -20,10 +21,54 @@ from frigate_learn.models import Deployment
 
 
 def test_render_frigate_detector_config():
-    snippet = render_frigate_detector_config("yolov8n-custom", "yolov8n-custom.hef", ["person", "car"])
+    snippet = render_frigate_detector_config(
+        "yolov8n-custom", "yolov8n-custom.hef", ["person", "car"], imgsz=320
+    )
     assert "type: hailo" in snippet
     assert snippet.find("hef_path: /usr/share/frigate/models/yolov8n-custom.hef") != -1
     assert "num_classes: 2" in snippet
+    assert "model input: 320x320" in snippet
+
+
+def test_export_onnx_requires_explicit_imgsz(tmp_path):
+    onnx = Path("model.onnx")
+    assert export_onnx(onnx, tmp_path, imgsz=320) == onnx
+    with pytest.raises(TypeError):
+        export_onnx(onnx, tmp_path)
+
+
+def test_deploy_resolves_imgsz_from_training_config(config, db, tmp_path):
+    weights = tmp_path / "best.pt"
+    weights.write_text("# fake weights", encoding="utf-8")
+
+    outcome = deploy(
+        config, db,
+        model_name="yolov8n-nightly",
+        weights=weights,
+        version="v001",
+        dry_run=True,
+        out_dir=tmp_path / "models" / "yolov8n-nightly",
+    )
+    manifest = json.loads(outcome.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["imgsz"] == config.training.image_size
+    assert f"model input: {config.training.image_size}x{config.training.image_size}" in outcome.config_snippet
+
+
+def test_deploy_explicit_imgsz_override(config, db, tmp_path):
+    weights = tmp_path / "best.pt"
+    weights.write_text("# fake weights", encoding="utf-8")
+
+    outcome = deploy(
+        config, db,
+        model_name="yolov8n-nightly",
+        weights=weights,
+        version="v001",
+        imgsz=640,
+        dry_run=True,
+        out_dir=tmp_path / "models" / "yolov8n-nightly",
+    )
+    manifest = json.loads(outcome.manifest_path.read_text(encoding="utf-8"))
+    assert manifest["imgsz"] == 640
 
 
 def test_compile_hailo_dry_run_writes_placeholder(tmp_path):

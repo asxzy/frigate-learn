@@ -52,7 +52,7 @@ def _sha256(path: Path) -> str:
     return hasher.hexdigest()
 
 
-def export_onnx(weights: Path, out_dir: Path, imgsz: int = 640) -> Path:
+def export_onnx(weights: Path, out_dir: Path, imgsz: int) -> Path:
     """Export a trained weights file to ONNX (ultralytics export)."""
     if weights.suffix == ".onnx":
         return weights
@@ -96,12 +96,13 @@ def compile_hailo(onnx_path: Path, out_dir: Path, *, dry_run: bool = False) -> P
 
 
 def render_frigate_detector_config(
-    model_name: str, hef_name: str, classes: Sequence[str]
+    model_name: str, hef_name: str, classes: Sequence[str], imgsz: int
 ) -> str:
     """Frigate ``config.yml`` detector block for a compiled Hailo model."""
     num_classes = len(classes)
     lines = [
         "# --- frigate detectors section (paste under 'detectors:') ---",
+        f"# model input: {imgsz}x{imgsz} (letterbox target shared by train/eval/export)",
         f"  {model_name}:",
         "    type: hailo",
         f"    hef_path: /usr/share/frigate/models/{hef_name}",
@@ -119,12 +120,14 @@ def deploy(
     version: str = "",
     gate: GateResult | None = None,
     result=None,
-    imgsz: int = 640,
+    imgsz: int | None = None,
     dry_run: bool = False,
     out_dir: Path | None = None,
 ) -> DeployOutcome:
     models_dir = out_dir or config.resolve(config.data.root, "models") / model_name
     models_dir.mkdir(parents=True, exist_ok=True)
+
+    imgsz = imgsz or config.training.image_size
 
     onnx_path: Path | None = None
     hef_path: Path | None = None
@@ -143,6 +146,7 @@ def deploy(
         "{\n"
         f'  "model_name": "{model_name}",\n'
         f'  "version": "{version}",\n'
+        f'  "imgsz": {imgsz},\n'
         f'  "onnx": "{onnx_path.name}",\n'
         f'  "hef": "{hef_path.name}",\n'
         f'  "hef_sha256": "{_sha256(hef_path)}",\n'
@@ -151,7 +155,9 @@ def deploy(
         encoding="utf-8",
     )
 
-    snippet = render_frigate_detector_config(model_name, hef_path.name, config.classes)
+    snippet = render_frigate_detector_config(
+        model_name, hef_path.name, config.classes, imgsz=imgsz
+    )
     (models_dir / "frigate-detector.yml").write_text(snippet, encoding="utf-8")
 
     deployment_id = None

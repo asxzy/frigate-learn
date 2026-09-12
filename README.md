@@ -167,6 +167,7 @@ meaningful once there are real numbers (the gate reads the *last*
 # 2. benchmark the baseline AND the candidates in ONE run: the gate compares
 #    candidates against the baseline by name, so both must land in the same
 #    results file. yolov8l is the configured baseline (deployment.baseline).
+#    Available candidates: yolov8{n,s,m,l}, yolo11{n,s,m}, yolov9{t,s}.
 .venv/bin/frigate-learn benchmark \
     --candidate yolov8l --candidate yolov8n --candidate yolov8s
 
@@ -174,6 +175,12 @@ meaningful once there are real numbers (the gate reads the *last*
 #    recorded in the deployments ledger
 .venv/bin/frigate-learn gate
 ```
+
+All candidates are **COCO-pretrained checkpoints** (ultralytics downloads the
+`.pt` on first use) fine-tuned on your collected dataset — no public image
+dataset is needed. The pretrained weights carry the backbone knowledge; the
+frozen dataset versions provide the task-specific fine-tuning. If accuracy is
+short, grow/verify the collected data — adding COCO images is not a lever.
 
 What each step produces, measured on the **immutable golden dataset**
 (`data/golden/golden-v001/`, seeded from VLM-verified samples):
@@ -265,8 +272,15 @@ src/frigate_learn/
 ├── training/
 │   ├── trainer.py         # P7: YOLO fine-tuning (real run needs `ml` extra)
 │   └── candidates.py      # P7: candidate table (name → weights)
-└── deploy/
-    └── hailo.py           # P12: ONNX export + HEF compile + Frigate detector YAML
+├── deploy/
+│   └── hailo.py           # P12: ONNX export + HEF compile + Frigate detector YAML
+└── webapp/                # local control-panel dashboard (`frigate-learn web`)
+    ├── app.py             # FastAPI app factory + static mount
+    ├── api.py             # HTTP surface: 16 endpoints under /api/*
+    ├── queries.py         # read-side queries (overview, benchmark, datasets, …)
+    ├── serving.py         # image/thumb resolution + on-demand thumbnail cache
+    ├── jobs.py            # JobManager: pipeline stages in a background thread (jobs ledger)
+    └── static/            # no-build SPA: index.html, app.js, styles.css, vendor/uPlot
 ```
 
 ## Design rules

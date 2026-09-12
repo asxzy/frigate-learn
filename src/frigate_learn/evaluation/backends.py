@@ -20,7 +20,7 @@ class UltralyticsBackend(ModelBackend):
         self,
         weights: str,
         *,
-        imgsz: int = 640,
+        imgsz: int,
         device: str | None = None,
         name: str | None = None,
     ) -> None:
