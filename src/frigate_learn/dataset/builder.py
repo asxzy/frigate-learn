@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
+from ..classes import coco_index
 from ..config import AppConfig
 from ..db import Database
 from ..models import Sample
@@ -79,8 +80,16 @@ class DatasetBuilder:
             else:
                 target.unlink()
 
-        classes = list(self.config.classes)
-        class_id = {name: i for i, name in enumerate(classes)}
+        model_classes = self.config.model_class_names()
+        label_space = self.config.training.label_space
+        if label_space == "coco80":
+            class_id = {
+                name: coco_index(name)
+                for name in model_classes
+                if name in self.config.classes
+            }
+        else:
+            class_id = {name: i for i, name in enumerate(model_classes)}
         split_seed = seed or SPLIT_SEED
         summary = BuildSummary(version=version, root=target)
 
@@ -164,35 +173,37 @@ class DatasetBuilder:
 
         _write_dataset_yaml(
             target / "dataset.yaml",
-            classes,
+            model_classes,
             train="images/train",
             val="images/val",
             test="images/test",
         )
         self._write_split_files(target)
-        self._write_build_json(
-            target / "build.json",
-            {
-                "version": version,
-                "classes": classes,
-                "cameras": cameras,
-                "labels": labels,
-                "quality": quality,
-                "verified_only": verified_only,
-                "max_per_class": max_per_class,
-                "seed": split_seed,
-                "built_at": datetime.now(timezone.utc).isoformat(),
-                "summary": {
-                    "total": summary.total,
-                    "images_written": summary.images_written,
-                    "skipped_no_box": summary.skipped_no_box,
-                    "skipped_class": summary.skipped_class,
-                    "skipped_cap": summary.skipped_cap,
-                    "split_counts": summary.split_counts,
-                    "verified": summary.verified,
-                },
+        payload = {
+            "version": version,
+            "classes": list(self.config.classes),
+            "label_space": label_space,
+            "cameras": cameras,
+            "labels": labels,
+            "quality": quality,
+            "verified_only": verified_only,
+            "max_per_class": max_per_class,
+            "seed": split_seed,
+            "built_at": datetime.now(timezone.utc).isoformat(),
+            "summary": {
+                "total": summary.total,
+                "images_written": summary.images_written,
+                "skipped_no_box": summary.skipped_no_box,
+                "skipped_class": summary.skipped_class,
+                "skipped_cap": summary.skipped_cap,
+                "split_counts": summary.split_counts,
+                "verified": summary.verified,
             },
-        )
+        }
+        trainable = self.config.trainable_class_mask()
+        if trainable is not None:
+            payload["trainable"] = trainable
+        self._write_build_json(target / "build.json", payload)
         return summary
 
     # --- internals --------------------------------------------------------
