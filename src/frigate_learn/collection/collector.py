@@ -96,6 +96,7 @@ class Collector:
         limit: int | None = None,
         concurrency: int | None = None,
         progress: ProgressFn | None = None,
+        refresh: bool = False,
     ) -> CollectSummary:
         started = datetime.now(timezone.utc)
         summary = CollectSummary(
@@ -121,7 +122,7 @@ class Collector:
             event_to_review = self._resolve_events(reviews, summary)
             (progress or _noop)(f"Events found: {len(event_to_review)}")
 
-            new_events = self._prune_existing(event_to_review, summary)
+            new_events = self._prune_existing(event_to_review, summary, refresh=refresh)
             (progress or _noop)(f"New events to collect: {len(new_events)}")
 
             self._download_and_store(
@@ -180,9 +181,15 @@ class Collector:
         return mapping
 
     def _prune_existing(
-        self, event_to_review: dict[str, str], summary: CollectSummary
+        self, event_to_review: dict[str, str], summary: CollectSummary, refresh: bool = False
     ) -> list[tuple[str, str]]:
-        """Remove events already stored as samples (idempotency)."""
+        """Remove events already stored as samples (idempotency).
+
+        With ``refresh=True``, already-stored events are *not* pruned: their
+        existing samples/annotations/image files are deleted and they are
+        re-collected under the current collection settings (e.g. upgrading a
+        crop-era pool to full-frame snapshots).
+        """
         event_ids = list(event_to_review.keys())
         existing: set[str] = set()
         with self.db.session() as session:
@@ -191,14 +198,42 @@ class Collector:
                 if row is not None:
                     existing.add(event_id)
         summary.duplicate_samples = len(existing)
-        new_events = [
-            (eid, event_to_review[eid]) for eid in event_ids if eid not in existing
-        ]
+        if refresh:
+            deleted = 0
+            for event_id in existing:
+                deleted += self._delete_event(event_id)
+            info("refresh: dropped prior collection", events=len(existing), samples=deleted)
+        if refresh:
+            # re-collect the previously-stored events too (they were deleted above)
+            new_events = list(event_to_review.items())
+        else:
+            new_events = [
+                (eid, event_to_review[eid]) for eid in event_ids if eid not in existing
+            ]
         max_events = self.config.collection.max_events
         if max_events and len(new_events) > max_events:
             new_events = new_events[:max_events]
         summary.events_new = len(new_events)
         return new_events
+
+    def _delete_event(self, event_id: str) -> int:
+        """Remove stored samples + annotations (+ image files) for an event."""
+        deleted = 0
+        with self.db.session() as session:
+            samples = (
+                session.query(Sample).filter(Sample.event_id == event_id).all()
+            )
+            for sample in samples:
+                if sample.image_path:
+                    Path(sample.image_path).unlink(missing_ok=True)
+                if sample.debug_image_path:
+                    Path(sample.debug_image_path).unlink(missing_ok=True)
+                session.query(Annotation).filter(Annotation.sample_id == sample.id).delete()
+            for sample in samples:
+                session.delete(sample)
+            session.commit()
+            deleted = len(samples)
+        return deleted
 
     def _download_and_store(
         self,

@@ -66,6 +66,7 @@ class DatasetBuilder:
         verified_only: bool = True,
         max_per_class: int | None = None,
         seed: str | None = None,
+        since: str | None = None,
         overwrite: bool = False,
     ) -> BuildSummary:
         target = self.config.datasets_dir() / version
@@ -101,7 +102,7 @@ class DatasetBuilder:
 
         cap_counts: dict[str, int] = {}
 
-        rows = self._query_samples(cameras, labels, quality)
+        rows = self._query_samples(cameras, labels, quality, since)
         summary.total = len(rows)
 
         # deterministic order so per-class caps are stable across runs
@@ -213,9 +214,12 @@ class DatasetBuilder:
         cameras: list[str] | None,
         labels: list[str] | None,
         quality: str | None,
+        since: str | None = None,
     ):
         query = self.db.session().query(Sample)
         query = query.filter(Sample.status == "collected")
+        if since is not None:
+            query = query.filter(Sample.created_at >= since)
         if quality is not None:
             query = query.filter(Sample.quality == quality)
         else:

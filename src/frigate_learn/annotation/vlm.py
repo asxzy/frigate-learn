@@ -25,6 +25,15 @@ logger = logging.getLogger(__name__)
 _RETRY_STATUS = {429, 500, 502, 503, 504}
 
 
+class VLMTransportError(VLMValidationError):
+    """The VLM service itself failed (network/HTTP), not the model output.
+
+    Subclasses ``VLMValidationError`` so existing callers keep working, but
+    consumers can distinguish service outages from schema rejections: a dead
+    endpoint says nothing about the image, so samples must not be discarded.
+    """
+
+
 class VLMProvider(Protocol):
     def verify(self, images: Sequence[Path]) -> Sequence[Sequence[VLMObject]]: ...
 
@@ -138,7 +147,7 @@ class OpenAICompatibleProvider:
                 ):
                     self._backoff(attempt)
                     continue
-                raise VLMValidationError(f"VLM request failed for {image}: {exc}") from exc
+                raise VLMTransportError(f"VLM request failed for {image}: {exc}") from exc
         return []  # pragma: no cover - unreachable (raised above)
 
     def _backoff(self, attempt: int) -> None:
@@ -167,4 +176,4 @@ def build_provider(
     raise ValueError(f"unknown vlm provider: {provider_name!r}")
 
 
-__all__ = ["VLMProvider", "OpenAICompatibleProvider", "build_provider"]
+__all__ = ["VLMProvider", "OpenAICompatibleProvider", "VLMTransportError", "build_provider"]

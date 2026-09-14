@@ -19,7 +19,7 @@ from ..config import AppConfig
 from ..db import Database
 from ..logutil import debug, error, info, warning
 from .schema import VLMValidationError
-from .vlm import VLMProvider, build_provider
+from .vlm import VLMProvider, VLMTransportError, build_provider
 from ..models import Annotation, Job, Sample, utcnow
 
 logger = logging.getLogger(__name__)
@@ -69,6 +69,7 @@ class Verifier:
         cameras: list[str] | None = None,
         labels: list[str] | None = None,
         days: int | None = None,
+        since: str | None = None,
         force: bool = False,
     ) -> VerifySummary:
         """Verify unverified samples (or all when ``force``)."""
@@ -90,6 +91,8 @@ class Verifier:
                 query = query.filter(Sample.frigate_label.in_(labels))
             if from_ts is not None:
                 query = query.filter(Sample.timestamp >= from_ts)
+            if since is not None:
+                query = query.filter(Sample.created_at >= since)
             query = query.filter(
                 (Sample.quality != "bad") | (Sample.quality.is_(None))
             )
@@ -110,6 +113,8 @@ class Verifier:
         summary.skipped = sum(1 for p in pictures if p is None or not p.is_file())
 
         batch_size = max(1, self.config.vlm.batch_size)
+        consecutive_errors = 0
+        error_limit = max(1, self.config.vlm.max_consecutive_errors)
         try:
             for start in range(0, len(candidates), batch_size):
                 batch = candidates[start : start + batch_size]
@@ -123,17 +128,32 @@ class Verifier:
                 _samples, paths = zip(*pairs)
                 try:
                     per_image = self.provider.verify(list(paths))
+                    consecutive_errors = 0
                 except VLMValidationError:
                     # One bad response must not abort the whole pass: isolate
-                    # the offending image(s), drop them, and keep the good ones.
+                    # the offending image(s), drop schema rejections, keep the
+                    # good ones. Transport failures never drop: a dead endpoint
+                    # says nothing about the image.
                     debug("vlm batch rejected; isolating per-image", batch=len(paths))
                     per_image = []
                     for sample, path in pairs:
                         try:
                             per_image.append(self.provider.verify([path])[0])
+                        except VLMTransportError as exc:
+                            debug("vlm transport failure", sample_id=sample.id, error=str(exc))
+                            summary.failed += 1
+                            consecutive_errors += 1
+                            per_image.append(None)
+                            if consecutive_errors >= error_limit:
+                                raise VLMTransportError(
+                                    f"VLM endpoint failing ({consecutive_errors} "
+                                    f"consecutive transport errors); aborting to "
+                                    f"protect the sample pool"
+                                ) from exc
                         except VLMValidationError as exc:
                             debug("vlm rejection", sample_id=sample.id, error=str(exc))
                             summary.failed += 1
+                            consecutive_errors = 0
                             self._drop(sample, summary)
                             per_image.append(None)
                 for (sample, _path), objects in zip(pairs, per_image):
@@ -141,6 +161,7 @@ class Verifier:
                         continue
                     try:
                         self._store(sample, objects, summary)
+                        consecutive_errors = 0
                     except VLMValidationError as exc:
                         debug("vlm rejection", sample_id=sample.id, error=str(exc))
                         summary.failed += 1

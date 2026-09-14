@@ -54,9 +54,12 @@ class CollectionSettings:
     dedup_enabled: bool = True
     phash_threshold: int = 10
     # Collect server-side region crops (crop=1&height=<H> snapshots) instead of
-    # full frames, matching what Frigate feeds the detector. None -> use
-    # training.image_size as the crop height.
-    region_crop: bool = True
+    # full frames. Default is FULL frames: the Frigate detector receives the
+    # whole camera frame (letterboxed to training.image_size) and golden eval
+    # uses full frames too, so crop-trained weights regress at evaluation.
+    # Enabling crops is an opt-in zoom for snapshot review, not train-domain
+    # parity.
+    region_crop: bool = False
     region_crop_height: int | None = None
 
 
@@ -77,6 +80,9 @@ class VLMSettings:
     batch_size: int = 4
     temperature: float = 0.0
     timeout_seconds: float = 120.0
+    # abort the verify pass after this many consecutive transport (network/HTTP)
+    # failures, so a dead endpoint can't silently drop the whole sample pool
+    max_consecutive_errors: int = 3
     # "{classes}" is interpolated with the configured class names.
     system_prompt: str = (
         "You are a precise object-detection annotator. Return ONLY a JSON object "
@@ -152,11 +158,12 @@ class AppConfig:
     base_dir: Path = field(default_factory=Path.cwd)
 
     def resolve(self, *parts: str) -> Path:
-        """Resolve a consumer of `data.*` paths relative to the anchor."""
-        for p in parts:
-            if Path(p).is_absolute():
-                return Path(p)
-            break
+        """Resolve a consumer of `data.*` paths relative to the anchor.
+
+        Absolute parts anchor the join from that position (pathlib semantics):
+        ``resolve("data", "db")`` = ``<base>/data/db`` while
+        ``resolve("/abs/root", "db")`` = ``/abs/root/db``.
+        """
         return self.base_dir.joinpath(*parts)
 
     def database_path(self) -> Path:
@@ -309,6 +316,9 @@ def build_config(raw: dict[str, Any], base_dir: Path) -> AppConfig:
     cfg.vlm.batch_size = int(_pop(vlm, "batch_size", cfg.vlm.batch_size))
     cfg.vlm.temperature = float(_pop(vlm, "temperature", cfg.vlm.temperature))
     cfg.vlm.timeout_seconds = float(_pop(vlm, "timeout_seconds", cfg.vlm.timeout_seconds))
+    cfg.vlm.max_consecutive_errors = int(
+        _pop(vlm, "max_consecutive_errors", cfg.vlm.max_consecutive_errors)
+    )
     cfg.vlm.system_prompt = str(
         _pop(vlm, "system_prompt", cfg.vlm.system_prompt)
     )

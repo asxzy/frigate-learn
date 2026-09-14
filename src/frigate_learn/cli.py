@@ -178,6 +178,8 @@ def _summary_lines(summary: CollectSummary) -> list[str]:
 @click.option("--concurrency", type=int, default=None, help="Parallel downloads (default: config).")
 @click.option("--no-region-crop", "no_region_crop", is_flag=True, default=False,
               help="Collect full-frame clean snapshots instead of region crops.")
+@click.option("--refresh-images", "refresh_images", is_flag=True, default=False,
+              help="Re-collect already-stored events under current settings (replaces prior samples).")
 @click.pass_context
 def collect(
     ctx: click.Context,
@@ -190,6 +192,7 @@ def collect(
     limit: int | None,
     concurrency: int | None,
     no_region_crop: bool,
+    refresh_images: bool,
 ) -> None:
     """Collect review/event data from Frigate into the local dataset."""
     config = _load_config(ctx)
@@ -224,6 +227,7 @@ def collect(
             limit=limit if limit is not None else config.collection.max_reviews,
             concurrency=concurrency,
             progress=progress,
+            refresh=refresh_images,
         )
     except Exception as exc:  # fatal (e.g. bad token / connection refused)
         raise click.ClickException(f"collection failed: {exc}")
@@ -406,6 +410,11 @@ def triage_batch(
 @click.option("--camera", "cameras", multiple=True)
 @click.option("--label", "labels", multiple=True)
 @click.option("--days", type=int, default=None)
+@click.option(
+    "--since",
+    default=None,
+    help="ISO created_at floor (e.g. 2026-09-14T00:00:00+00:00) to verify only samples collected after.",
+)
 @click.pass_context
 def verify(
     ctx: click.Context,
@@ -414,6 +423,7 @@ def verify(
     cameras: tuple[str, ...],
     labels: tuple[str, ...],
     days: int | None,
+    since: str | None,
 ) -> None:
     """Verify unverified samples with the VLM; writes verified annotations.
 
@@ -432,6 +442,7 @@ def verify(
     summary = Verifier(config, database).verify(
         force=force, limit=limit,
         cameras=list(cameras) or None, labels=list(labels) or None, days=days,
+        since=since,
     )
     click.echo(
         f"processed={summary.processed} annotated={summary.annotated} "
@@ -458,6 +469,11 @@ def dataset() -> None:
 @click.option("--include-unverified", is_flag=True, help="Also write samples labeled only by Frigate (default: verified-only).")
 @click.option("--max-per-class", type=int, default=None)
 @click.option("--seed", default=None)
+@click.option(
+    "--since",
+    default=None,
+    help="ISO created_at floor for samples to include (e.g. 2026-09-14T00:00:00+00:00).",
+)
 @click.option("--overwrite", is_flag=True)
 @click.pass_context
 def dataset_build(
@@ -469,6 +485,7 @@ def dataset_build(
     include_unverified: bool,
     max_per_class: int | None,
     seed: str | None,
+    since: str | None,
     overwrite: bool,
 ) -> None:
     """Build dataset version VERSION (e.g. v001) from the sample pool."""
@@ -485,6 +502,7 @@ def dataset_build(
         verified_only=not include_unverified,
         max_per_class=max_per_class,
         seed=seed,
+        since=since,
         overwrite=overwrite,
     )
     split = ", ".join(f"{s}={c}" for s, c in summary.split_counts.items())

@@ -58,6 +58,20 @@ function fmtBytes(n) {
   return v.toFixed(v >= 100 || i === 0 ? 0 : 1) + " " + u[i];
 }
 
+function fmtDur(start, end) {
+  if (!start) return "";
+  const s = new Date(start).getTime();
+  if (!Number.isFinite(s)) return "";
+  const e = end ? new Date(end).getTime() : Date.now();
+  const sec = Math.max(0, Math.round((e - s) / 1000));
+  if (sec < 1) return "0s";
+  if (sec < 60) return sec + "s";
+  const min = Math.floor(sec / 60);
+  if (min < 60) return min + "m " + (sec % 60) + "s";
+  const hr = Math.floor(min / 60);
+  return hr + "h " + (min % 60) + "m";
+}
+
 function pill(cls, text) {
   return `<span class="pill ${esc(cls)}">${esc(text)}</span>`;
 }
@@ -83,6 +97,173 @@ function tableCaption(title) {
 
 function errorBox(container, message) {
   container.appendChild(h("div", "placeholder", String(message)));
+}
+
+function renderPipelinePanel(data) {
+  const panel = h("div", "pipeline-panel");
+  panel.appendChild(h("h2", "card-title", "Run pipeline"));
+  panel.appendChild(h("div", "status-line",
+    "runs the selected stages as one job in this server (one job at a time)"));
+  const steps = data.steps || [];
+  const enabled = new Set(data.auto_enable || []);
+  const selected = new Set(steps.length ? (enabled.size ? enabled : steps) : []);
+  const grid = h("div", "step-grid");
+  const checks = new Map();
+  for (const step of steps) {
+    const lab = h("label", null);
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    cb.checked = selected.has(step);
+    cb.value = step;
+    lab.appendChild(cb);
+    lab.appendChild(document.createTextNode(step));
+    grid.appendChild(lab);
+    checks.set(step, cb);
+  }
+  panel.appendChild(grid);
+  const controls = h("div", "buttons-row");
+  const dryLab = h("label", null);
+  const dry = document.createElement("input");
+  dry.type = "checkbox";
+  dryLab.appendChild(dry);
+  dryLab.appendChild(document.createTextNode(" dry run"));
+  dryLab.title = "validate and report without writing data";
+  const runBtn = h("button", "btn btn-run", "Run pipeline");
+  const status = h("span", "status-line");
+  const updateEnabled = () => {
+    runBtn.disabled = hasRunning || ![...checks.values()].some((c) => c.checked);
+  };
+  for (const cb of checks.values()) cb.addEventListener("change", updateEnabled);
+  runBtn.addEventListener("click", async () => {
+    const chosen = [...checks.entries()]
+      .filter(([, cb]) => cb.checked)
+      .map(([s]) => s);
+    runBtn.disabled = true;
+    status.textContent = "starting job…";
+    try {
+      const res = await api("/api/jobs/run", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ steps: chosen, dry_run: dry.checked }),
+      });
+      status.textContent = `job ${res.job_id} started${dry.checked ? " (dry run)" : ""} — live log open below`;
+      hasRunning = true;
+      renderBanner({ id: res.job_id, status: "running" });
+      openJobDrawer(res.job_id);
+      views.overview.stale = true;
+      render("overview");
+    } catch (e) {
+      status.textContent = e.message;
+      updateEnabled();
+    }
+  });
+  dry.addEventListener("change", updateEnabled);
+  controls.appendChild(runBtn);
+  controls.appendChild(dryLab);
+  controls.appendChild(status);
+  panel.appendChild(controls);
+  panel.appendChild(h("div", "status-line",
+    "note: stages run in this server's process; stopping the server stops a running job"));
+  return panel;
+}
+
+let drawerJobId = null;
+let drawerTimer = null;
+let drawerRendering = false;
+
+function closeDrawer() {
+  drawerJobId = null;
+  if (drawerTimer) { clearInterval(drawerTimer); drawerTimer = null; }
+  const d = $("#drawer");
+  d.hidden = true;
+  d.innerHTML = "";
+}
+
+function openJobDrawer(jobId) {
+  drawerJobId = jobId;
+  renderJobDrawer(jobId);
+  if (drawerTimer) { clearInterval(drawerTimer); drawerTimer = null; }
+  drawerTimer = setInterval(() => renderJobDrawer(jobId), 3000);
+}
+
+async function renderJobDrawer(jobId) {
+  if (drawerRendering) return;
+  drawerRendering = true;
+  try {
+    let job;
+    try {
+      job = await api("/api/jobs/" + encodeURIComponent(jobId));
+    } catch (e) {
+      return;
+    }
+    const d = $("#drawer");
+    const wasOpen = !d.hidden;
+    const prevScroll = wasOpen ? (d.querySelector(".drawer-body") || {}).scrollTop || 0 : 0;
+    d.hidden = false;
+    const head = h("div", "drawer-head");
+    head.appendChild(h("h2", null, "job " + job.id.slice(0, 8)));
+    head.appendChild(pillNode(job.status || "—", job.status || ""));
+    const closeBtn = h("button", "drawer-close", "✕");
+    closeBtn.title = "close";
+    closeBtn.addEventListener("click", closeDrawer);
+    head.appendChild(closeBtn);
+
+    const body = h("div", "drawer-body");
+    const meta = h("div", "drawer-meta");
+    const fields = [
+      ["id", job.id],
+      ["type", job.type],
+      ["started", fmtTs(job.started_at)],
+      ["finished", job.finished_at ? fmtTs(job.finished_at) : "running"],
+      ["duration", fmtDur(job.started_at, job.finished_at)],
+    ];
+    for (const [k, v] of fields) {
+      meta.appendChild(h("div", "k", k));
+      meta.appendChild(h("div", "v", v === null || v === undefined || v === "" ? "—" : String(v)));
+    }
+    body.appendChild(meta);
+    if (job.error) {
+      body.appendChild(h("div", "drawer-error", job.error));
+    }
+    const reports = job.reports || [];
+    if (reports.length) {
+      body.appendChild(h("h2", "card-title", "Stage reports"));
+      const repBox = h("div", "drawer-reports");
+      for (const r of reports) {
+        const rep = h("div", "drawer-rep");
+        rep.appendChild(h("span", "rep-name", r.name));
+        rep.appendChild(pillNode(r.status || "—", r.status || ""));
+        rep.appendChild(h("span", "rep-msg", r.message || ""));
+        repBox.appendChild(rep);
+      }
+      body.appendChild(repBox);
+    }
+    const log = job.log_tail || [];
+    body.appendChild(h("h2", "card-title", "Log tail"));
+    if (!log.length) {
+      body.appendChild(h("div", "drawer-empty",
+        job.status === "running" ? "waiting for log lines…" : "no log captured"));
+    } else {
+      body.appendChild(h("pre", "drawer-log", log.join("\n")));
+    }
+    d.innerHTML = "";
+    d.appendChild(head);
+    d.appendChild(body);
+    const db = d.querySelector(".drawer-body");
+    if (job.status === "running") {
+      const logEl = body.querySelector(".drawer-log");
+      if (logEl) logEl.scrollTop = logEl.scrollHeight;
+      if (db) db.scrollTop = db.scrollHeight;
+    } else if (wasOpen && db) {
+      db.scrollTop = prevScroll;
+    }
+    if (job.status !== "running" && drawerTimer) {
+      clearInterval(drawerTimer);
+      drawerTimer = null;
+    }
+  } finally {
+    drawerRendering = false;
+  }
 }
 
 let charts = [];
@@ -222,15 +403,19 @@ async function renderOverview(sec) {
   cards.appendChild(countCard("Next build", data.next_build_version || "—", "dataset version"));
   sec.appendChild(cards);
 
+  sec.appendChild(renderPipelinePanel(data));
+
   sec.appendChild(tableCaption("Recent jobs"));
   const jobs = data.pipeline || [];
   if (!jobs.length) {
     sec.appendChild(h("div", "placeholder",
-      "no jobs yet — pipeline: collect, verify, build, train, benchmark, gate, deploy"));
+      "no jobs yet — pick the stages above and run the pipeline"));
   } else {
     const table = h("table");
+    table.className = "jobs-table";
     table.innerHTML = `
-      <thead><tr><th>id</th><th>type</th><th>status</th><th>started</th><th>error</th></tr></thead>
+      <thead><tr><th>id</th><th>type</th><th>status</th><th>started</th>
+      <th>duration</th><th>error</th><th></th></tr></thead>
       <tbody></tbody>`;
     const tbody = table.querySelector("tbody");
     for (const j of jobs) {
@@ -240,10 +425,21 @@ async function renderOverview(sec) {
         <td>${esc(j.type)}</td>
         <td>${pill(j.status, j.status)}</td>
         <td>${esc(fmtTs(j.started_at))}</td>
+        <td>${esc(fmtDur(j.started_at, j.finished_at))}</td>
         <td>${esc(j.error || "")}</td>`;
+      const tdLog = h("td");
+      const logBtn = h("button", "btn", j.status === "running" ? "live" : "log");
+      logBtn.addEventListener("click", (ev) => {
+        ev.stopPropagation();
+        openJobDrawer(j.id);
+      });
+      tdLog.appendChild(logBtn);
+      tr.appendChild(tdLog);
+      tr.addEventListener("click", () => openJobDrawer(j.id));
       tbody.appendChild(tr);
     }
     sec.appendChild(table);
+    sec.appendChild(h("div", "status-line", "click a row or “log” to open the job with stage reports and log tail"));
   }
 }
 
@@ -318,7 +514,8 @@ async function renderBenchmark(sec) {
   sec.appendChild(tableCaption("Candidates"));
   const results = data.results || [];
   if (!results.length) {
-    sec.appendChild(h("div", "placeholder", "no benchmark results yet — run the benchmark stage"));
+    sec.appendChild(h("div", "placeholder",
+      "no benchmark results yet — run “Re-benchmark + gate” above to seed the golden comparison"));
   } else {
     const table = h("table");
     table.innerHTML = `
@@ -456,7 +653,8 @@ async function renderDatasets(sec) {
   const versions = data.versions || [];
   sec.appendChild(tableCaption("Dataset versions"));
   if (!versions.length) {
-    sec.appendChild(h("div", "placeholder", "no dataset versions built yet"));
+    sec.appendChild(h("div", "placeholder",
+      "no dataset versions built yet — run collect → verify → build from the Overview pipeline controls"));
   } else {
     const table = h("table");
     table.innerHTML = `
@@ -510,7 +708,8 @@ async function renderTraining(sec) {
   const runs = listData.runs || [];
   sec.appendChild(tableCaption("Training runs"));
   if (!runs.length) {
-    sec.appendChild(h("div", "placeholder", "no training runs found"));
+    sec.appendChild(h("div", "placeholder",
+      "no training runs found — run the train stage from the Overview pipeline controls"));
     return;
   }
   if (!trainingState.run || !runs.some((r) => r.run === trainingState.run)) {
@@ -877,6 +1076,11 @@ function closeLightbox() {
 
 document.addEventListener("keydown", (e) => {
   const lb = $("#lightbox");
+  const dr = $("#drawer");
+  if (e.key === "Escape" && !dr.hidden) {
+    closeDrawer();
+    return;
+  }
   if (lb.hidden) return;
   if (e.key === "Escape") {
     closeLightbox();
@@ -892,26 +1096,43 @@ document.addEventListener("keydown", (e) => {
 let hasRunning = false;
 let jobPolling = false;
 
+function renderBanner(runningJob) {
+  const banner = $("#job-banner");
+  banner.onclick = null;
+  document.body.classList.toggle("running", !!runningJob);
+  if (!runningJob) {
+    banner.hidden = true;
+    banner.innerHTML = "";
+    return;
+  }
+  banner.hidden = false;
+  banner.innerHTML = "";
+  const body = h("span", "banner-body");
+  body.appendChild(h("span", "spinner"));
+  body.appendChild(h("span", null,
+    `job ${runningJob.id.slice(0, 8)} · pipeline running — click for live log`));
+  banner.appendChild(body);
+  banner.onclick = () => openJobDrawer(runningJob.id);
+  document.documentElement.style.setProperty("--banner-h", banner.offsetHeight + "px");
+}
+
 async function pollJobs() {
   if (jobPolling) return;
   jobPolling = true;
   try {
     const jobs = await api("/api/jobs");
-    const running = jobs.some((j) => j.status === "running");
+    const runningJob = jobs.find((j) => j.status === "running") || null;
+    const running = !!runningJob;
     const becameIdle = hasRunning && !running;
     hasRunning = running;
-    const banner = $("#job-banner");
-    banner.hidden = !running;
-    document.body.classList.toggle("running", running);
-    if (running) {
-      document.documentElement.style.setProperty("--banner-h", banner.offsetHeight + "px");
-    }
+    renderBanner(runningJob);
     if (running && currentView === "overview" && views.overview.loaded) {
       render("overview");
     }
     if (becameIdle) {
       views.benchmark.stale = true;
       views.quality.stale = true;
+      if (drawerJobId) renderJobDrawer(drawerJobId);
       if (views[currentView] && views[currentView].loaded) render(currentView);
     }
   } catch (e) {}

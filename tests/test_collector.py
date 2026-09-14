@@ -282,7 +282,62 @@ def test_labels_cameras_filters_passthrough(config, db):
     assert fake.last_kwargs["severity"] == ["alert"]
 
 
-def test_region_crop_default_collects_crops_not_full_frames(config, db):
+def test_default_collects_full_frames_not_crops(config, db):
+    fake = FakeFrigate(
+        reviews_raw=[_review("r1", "front", 200, ["e1"])],
+        events_raw={"e1": _event("e1", "front", "person", 200)},
+    )
+    summary = Collector(config, db, client=fake).collect(from_ts=0)
+    assert summary.new_samples == 1
+    assert summary.new_annotations == 1
+    assert [d[0] for d in fake.downloads] == ["clean"]
+    with db.session() as s:
+        row = s.query(Sample).one()
+        attrs = s.query(Annotation).all()
+    assert len(attrs) == 1  # full-frame mode writes the Frigate box as annotation
+    assert (row.frigate_x1, row.frigate_y1, row.frigate_x2, row.frigate_y2) == (0.1, 0.2, 0.4, 0.8)
+    image = Path(row.image_path)
+    assert image.is_file()
+    assert image.read_bytes().startswith(b"\xff\xd8\xff\xe0fakejpeg-")
+
+
+def test_refresh_images_replaces_prior_samples(config, db):
+    config.collection.region_crop = True  # first pass: crop era
+    fake = FakeFrigate(
+        reviews_raw=[_review("r1", "front", 200, ["e1"])],
+        events_raw={"e1": _event("e1", "front", "person", 200)},
+    )
+    collector = Collector(config, db, client=fake)
+    first = collector.collect(from_ts=0)
+    assert first.new_samples == 1
+    with db.session() as s:
+        old = s.query(Sample).one()
+    old_id = old.id
+    old_path = Path(old.image_path)
+    assert old_path.is_file()
+
+    # second pass with full-frame default + refresh: prior row replaced
+    config.collection.region_crop = False
+    fake2 = FakeFrigate(
+        reviews_raw=[_review("r1", "front", 200, ["e1"])],
+        events_raw={"e1": _event("e1", "front", "person", 200)},
+    )
+    second = Collector(config, db, client=fake2).collect(from_ts=0, refresh=True)
+    assert second.events_new == 1
+    assert [d[0] for d in fake2.downloads] == ["clean"]
+    with db.session() as s:
+        rows = s.query(Sample).all()
+        anns = s.query(Annotation).all()
+    assert len(rows) == 1  # replaced, not appended
+    assert rows[0].id != old_id
+    assert not old_path.exists()  # old crop image file removed
+    assert rows[0].image_path != str(old_path)
+    assert Path(rows[0].image_path).is_file()
+    assert len(anns) == 1  # full-frame pass writes the Frigate box annotation
+
+
+def test_region_crop_opt_in_collects_crops(config, db):
+    config.collection.region_crop = True
     fake = FakeFrigate(
         reviews_raw=[_review("r1", "front", 200, ["e1"])],
         events_raw={"e1": _event("e1", "front", "person", 200)},
@@ -301,7 +356,8 @@ def test_region_crop_default_collects_crops_not_full_frames(config, db):
     assert image.read_bytes().startswith(b"\xff\xd8\xff\xe0fakecrop-")
 
 
-def test_region_crop_default_height_from_training(config, db):
+def test_region_crop_opt_in_height_from_training(config, db):
+    config.collection.region_crop = True
     fake = FakeFrigate(
         reviews_raw=[_review("r1", "front", 200, ["e1"])],
         events_raw={"e1": _event("e1", "front", "person", 200)},
@@ -312,6 +368,7 @@ def test_region_crop_default_height_from_training(config, db):
 
 
 def test_region_crop_configured_height(config, db):
+    config.collection.region_crop = True
     config.collection.region_crop_height = 512
     fake = FakeFrigate(
         reviews_raw=[_review("r1", "front", 200, ["e1"])],
@@ -323,6 +380,7 @@ def test_region_crop_configured_height(config, db):
 
 
 def test_region_crop_skips_degenerate_box(config, db):
+    config.collection.region_crop = True
     fake = FakeFrigate(
         reviews_raw=[_review("r1", "front", 200, ["e_bad"])],
         events_raw={
@@ -338,6 +396,7 @@ def test_region_crop_skips_degenerate_box(config, db):
 
 
 def test_region_crop_forces_single_frame(config, db):
+    config.collection.region_crop = True
     config.sampling.enabled = True
     config.sampling.max_samples_per_event = 3
     fake = FakeFrigate(
@@ -352,6 +411,7 @@ def test_region_crop_forces_single_frame(config, db):
 
 
 def test_region_crop_debug_uses_annotated_crop(config, db):
+    config.collection.region_crop = True
     config.collection.keep_annotated_snapshots = True
     fake = FakeFrigate(
         reviews_raw=[_review("r1", "front", 200, ["e1"])],

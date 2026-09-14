@@ -137,12 +137,15 @@ def _step_verify(config: AppConfig, db: Database, ctx: dict) -> StepReport:
     verifier = Verifier(config, db)
     summary = verifier.verify()
     ctx["verify"] = summary
-    return StepReport(
-        name="verify",
-        status="executed",
-        message=f"annotated={summary.annotated} failed={summary.failed} "
-        f"objects={summary.objects_written}",
+    message = (
+        f"annotated={summary.annotated} failed={summary.failed} "
+        f"objects={summary.objects_written}"
     )
+    if summary.error:
+        return StepReport(name="verify", status="failed", message=summary.error)
+    if summary.failed and not summary.annotated:
+        return StepReport(name="verify", status="failed", message=message)
+    return StepReport(name="verify", status="executed", message=message)
 
 
 def _step_build(config: AppConfig, db: Database, ctx: dict) -> StepReport:

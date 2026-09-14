@@ -23,7 +23,7 @@ def test_defaults():
     assert cfg.evaluation.golden_dataset == "golden-v001"
     assert len(cfg.classes) >= 8
     assert "person" in cfg.classes
-    assert cfg.collection.region_crop is True
+    assert cfg.collection.region_crop is False
     assert cfg.collection.region_crop_height is None
     assert cfg.training.label_space == "coco80"
 
@@ -54,6 +54,27 @@ def test_collection_region_crop_settings():
     assert cfg.collection.region_crop_height == 512
     assert cfg.data.root == "var"
     assert cfg.base_dir == Path("/tmp/x").resolve()
+
+
+def test_resolve_keeps_consumer_suffixes():
+    """Regression: an absolute ``data.root`` must not swallow the consumers
+    that follow it.
+
+    Bug: ``resolve()`` returned the first absolute part by itself, so
+    ``cfg.resolve(root, "images")`` collapsed to the bare ``root`` directory
+    and the database, images, golden, and datasets writers all opened the same
+    directory.
+    """
+    cfg = AppConfig()
+    cfg.base_dir = Path("/tmp/x").resolve()
+    cfg.data.root = "/abs/root"
+    db = cfg.resolve(cfg.data.root, cfg.data.database)
+    images = cfg.resolve(cfg.data.root, cfg.data.images)
+    golden = cfg.resolve(cfg.data.root, cfg.data.golden)
+    assert db == Path("/abs/root") / cfg.data.database
+    assert images == Path("/abs/root") / cfg.data.images
+    assert golden == Path("/abs/root") / cfg.data.golden
+    assert len({db.parent, images, golden}) == 3  # consumers stay distinct
 
 
 def test_interpolation_and_anchoring(tmp_path, monkeypatch):

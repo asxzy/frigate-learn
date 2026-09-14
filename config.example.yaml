@@ -97,6 +97,7 @@ evaluation:
   candidates:
     - "yolov8n"
     - "yolov8s"
+    - "yolov8l"
 
 deployment:
   max_latency_ms: 20

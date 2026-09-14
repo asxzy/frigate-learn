@@ -58,7 +58,7 @@ def test_collect_output(dbenv, monkeypatch):
             self.client = type("C", (), {"close": lambda self: None})()
 
         def collect(self, from_ts, to_ts=None, cameras=None, labels=None, severity=None,
-                    limit=None, concurrency=None, progress=None):
+                    limit=None, concurrency=None, progress=None, refresh=False):
             if progress:
                 progress("Reviews found: 2")
             return CollectSummary(
@@ -92,7 +92,7 @@ def test_collect_no_region_crop_flag(dbenv, monkeypatch):
             self.client = type("C", (), {"close": lambda self: None})()
 
         def collect(self, from_ts, to_ts=None, cameras=None, labels=None, severity=None,
-                    limit=None, concurrency=None, progress=None):
+                    limit=None, concurrency=None, progress=None, refresh=False):
             return CollectSummary(new_samples=0)
 
     monkeypatch.setattr("frigate_learn.cli.Collector", RecordingCollector)
