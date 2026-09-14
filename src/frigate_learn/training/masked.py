@@ -140,10 +140,12 @@ class MaskedDetectionTrainer(_TrainerBase):
             raise ValueError("trainable must be non-empty")
         super().__init__(**kwargs)
 
+    def set_model_attributes(self):
+        super().set_model_attributes()
+        self.model.criterion = MaskedDetectionLoss(self.model, trainable=self._trainable)
+
     def get_model(self, cfg, weights=None, verbose=True):
-        model = super().get_model(cfg, weights, verbose)
-        model.criterion = MaskedDetectionLoss(model, trainable=self._trainable)
-        return model
+        return super().get_model(cfg, weights, verbose)
 
 
 __all__ = ["MaskedDetectionLoss", "MaskedDetectionTrainer", "mask_cls_loss"]

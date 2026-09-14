@@ -89,7 +89,7 @@ def test_masked_detection_loss_frozen_class_adds_nothing():
     assert frozen < full
 
 
-def test_masked_trainer_get_model_attaches_criterion(monkeypatch, tmp_path):
+def test_masked_trainer_set_model_attributes_attaches_criterion(monkeypatch, tmp_path):
     from frigate_learn.training.masked import DetectionTrainer
 
     monkeypatch.setattr(DetectionTrainer, "get_dataset", lambda self: {"nc": 80})
@@ -98,11 +98,16 @@ def test_masked_trainer_get_model_attaches_criterion(monkeypatch, tmp_path):
 
     def _get_model(self, cfg, weights=None, verbose=True):
         m = YOLO("yolov8n.yaml").model
-        m.args = SimpleNamespace(box=7.5, cls=0.5, dfl=1.5)
         captured["model"] = m
         return m
 
+    def _set_model_attributes(self):
+        self.model.nc = self.data["nc"]
+        self.model.names = {i: f"c{i}" for i in range(self.data["nc"])}
+        self.model.args = SimpleNamespace(box=7.5, cls=0.5, dfl=1.5)
+
     monkeypatch.setattr(DetectionTrainer, "get_model", _get_model)
+    monkeypatch.setattr(DetectionTrainer, "set_model_attributes", _set_model_attributes)
 
     trainer = MaskedDetectionTrainer(
         trainable=(0, 15, 16),
@@ -112,9 +117,11 @@ def test_masked_trainer_get_model_attaches_criterion(monkeypatch, tmp_path):
             "project": str(tmp_path / "runs"),
         },
     )
-    model = trainer.get_model("yolov8n.yaml")
-    assert model is captured["model"]
-    criterion = model.criterion
+    trainer.model = trainer.get_model("yolov8n.yaml")
+    assert trainer.model is captured["model"]
+    assert not hasattr(trainer.model, "criterion")
+    trainer.set_model_attributes()
+    criterion = trainer.model.criterion
     assert isinstance(criterion, MaskedDetectionLoss)
     mask = criterion.cls_mask
     assert mask.shape == (1, 1, 80)
