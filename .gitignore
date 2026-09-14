@@ -21,3 +21,10 @@ golden/
 *.db-shm
 *.sqlite3
 data/previews/
+# macOS / editor litter
+.DS_Store
+*.ses
+
+# model weights (large, reproducible) + ultralytics output
+*.pt
+runs/
