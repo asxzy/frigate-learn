@@ -101,6 +101,9 @@ cp config.example.yaml config.yaml
 .venv/bin/frigate-learn gate               # vs. deployment.baseline, writes ledger
 .venv/bin/frigate-learn train v003 --real  # needs the `ml` extra
 .venv/bin/frigate-learn deploy --real      # ONNX export + Hailo HEF (dry-run by default)
+# real HEF compile: no Hailo device needed, but the DFC runs only on x86-64
+# Linux (macOS -> docker, see hailo.docker_image / docs/hailo-deploy.md):
+.venv/bin/frigate-learn deploy yolov9s data/models/yolov9s/best.onnx --real
 
 # the whole pipeline in one shot (stages/minimal deps are skipped cleanly)
 .venv/bin/frigate-learn run --days 1

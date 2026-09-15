@@ -825,6 +825,14 @@ def gate(ctx: click.Context, results_path: str | None, baseline: str) -> None:
 @click.option("--version", default="")
 @click.option("--imgsz", type=int, default=None)
 @click.option("--out-dir", type=click.Path(file_okay=False), default=None)
+@click.option("--calib", "calib_dir", type=click.Path(exists=True, file_okay=False), default=None,
+              help="Directory of camera frames for Hailo quantization (default: hailo.calib_images).")
+@click.option("--hw-arch", type=click.Choice(["hailo8", "hailo8l", "hailo8r"], case_sensitive=False), default=None,
+              help="Hailo architecture (default: hailo.hw_arch, hailo8 for the Frigate box).")
+@click.option("--docker-image", default=None,
+              help="DFC docker image for macOS hosts (default: hailo.docker_image).")
+@click.option("--calib-samples", type=int, default=None,
+              help="Calibration frames to fold into the .npy set (default: hailo.calib_samples).")
 @click.option("--dry-run", "dry_run", flag_value=True, default=True, help="Placeholder artifacts (default).")
 @click.option("--real", "dry_run", flag_value=False, help="Run the Hailo/ONNX export on this host.")
 @click.pass_context
@@ -835,6 +843,10 @@ def deploy(
     version: str,
     imgsz: int | None,
     out_dir: str | None,
+    calib_dir: str | None,
+    hw_arch: str | None,
+    docker_image: str | None,
+    calib_samples: int | None,
     dry_run: bool,
 ) -> None:
     """Export a trained model to a deployable Hailo/Frigate artifact."""
@@ -851,9 +863,14 @@ def deploy(
         imgsz=imgsz or config.training.image_size,
         dry_run=dry_run,
         out_dir=Path(out_dir) if out_dir else None,
+        calib_dir=Path(calib_dir) if calib_dir else None,
+        hw_arch=hw_arch,
+        docker_image=docker_image,
+        calib_samples=calib_samples,
     )
     click.echo(f"onnx={outcome.onnx_path}")
     click.echo(f"hef={outcome.hef_path}")
+    click.echo(f"hw_arch={outcome.hw_arch}")
     click.echo(f"manifest={outcome.manifest_path}")
     click.echo()
     click.echo(outcome.config_snippet)

@@ -123,6 +123,17 @@ class DeploymentSettings:
 
 
 @dataclass
+class HailoSettings:
+    """Hailo ONNX -> HEF compilation (P12, `deploy/hailo.py`)."""
+
+    hw_arch: str = "hailo8"             # DFC `--hw-arch`; the Frigate box is a Hailo-8
+    docker_image: str | None = None     # compiled DFC image, required to compile on macOS
+    calib_images: str | None = None     # dir of .jpg/.png/.jpeg frames for quantization
+    calib_samples: int = 64             # how many frames to fold into the calibration .npy
+    interactive: bool = False           # always pass `-y` to the DFC parser (auto-NMS)
+
+
+@dataclass
 class AutomationSettings:
     enable: list[str] = field(default_factory=lambda: ["collect", "build"])
     till: str = "build"
@@ -152,6 +163,7 @@ class AppConfig:
     training: TrainingSettings = field(default_factory=TrainingSettings)
     evaluation: EvaluationSettings = field(default_factory=EvaluationSettings)
     deployment: DeploymentSettings = field(default_factory=DeploymentSettings)
+    hailo: HailoSettings = field(default_factory=HailoSettings)
     automation: AutomationSettings = field(default_factory=AutomationSettings)
     data: DataSettings = field(default_factory=DataSettings)
     # absolute directory the config file lives in; anchors relative paths
@@ -373,6 +385,22 @@ def build_config(raw: dict[str, Any], base_dir: Path) -> AppConfig:
         _pop(dep, "max_cpu_percent", cfg.deployment.max_cpu_percent)
     )
     cfg.deployment.baseline = str(_pop(dep, "baseline", cfg.deployment.baseline))
+
+    hai = _section(raw, "hailo")
+    cfg.hailo.hw_arch = str(_pop(hai, "hw_arch", cfg.hailo.hw_arch))
+    cfg.hailo.docker_image = _pop(hai, "docker_image", None)
+    if cfg.hailo.docker_image is not None:
+        cfg.hailo.docker_image = str(cfg.hailo.docker_image)
+    cfg.hailo.calib_images = _pop(hai, "calib_images", None)
+    if cfg.hailo.calib_images is not None:
+        cfg.hailo.calib_images = str(cfg.hailo.calib_images)
+    cfg.hailo.calib_samples = int(_pop(hai, "calib_samples", cfg.hailo.calib_samples))
+    cfg.hailo.interactive = bool(_pop(hai, "interactive", cfg.hailo.interactive))
+    if cfg.hailo.hw_arch not in ("hailo8", "hailo8l", "hailo8r"):
+        raise ValueError(
+            f"unknown hailo.hw_arch {cfg.hailo.hw_arch!r}; "
+            "expected 'hailo8', 'hailo8l' or 'hailo8r' (DFC 3.x supported archs)"
+        )
 
     auto = _section(raw, "automation")
     cfg.automation.enable = (

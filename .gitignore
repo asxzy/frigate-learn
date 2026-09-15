@@ -25,6 +25,9 @@ data/previews/
 .DS_Store
 *.ses
 
+# Hailo DFC wheel (524MB build input for containers/scripts/build-hailo-dfc.sh)
+*.whl
+
 # model weights (large, reproducible) + ultralytics output
 *.pt
 runs/

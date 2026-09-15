@@ -109,6 +109,16 @@ deployment:
   # of this model.
   baseline: "yolov8l"
 
+# P12 - Hailo ONNX -> HEF compile (see docs/hailo-deploy.md). Compilation runs
+# host-side and never needs a Hailo device. The Dataflow Compiler runs only on
+# x86-64 Linux, so on macOS it executes inside hailo.docker_image.
+hailo:
+  hw_arch: "hailo8"            # Frigate box: Hailo-8 (not hailo8l)
+  docker_image: null           # e.g. "frigate-learn-hailo-dfc:3.34.0" on macOS; null on Linux with native DFC
+  calib_images: null           # dir of camera frames (.jpg/.png) for quantization; null -> random calib fallback
+  calib_samples: 64
+  interactive: false           # non-interactive DFC: auto-accept NMS/reparse prompts
+
 # P13 - what `frigate-learn run` (and the nightly cron) executes.
 automation:
   enable:
