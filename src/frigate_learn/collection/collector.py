@@ -119,6 +119,10 @@ class Collector:
             summary.reviews_found = len(reviews)
             (progress or _noop)(f"Reviews found: {len(reviews)}")
 
+            reviewed_by_id = {
+                r.id: r.has_been_reviewed for r in reviews if r.has_been_reviewed is not None
+            }
+
             event_to_review = self._resolve_events(reviews, summary)
             (progress or _noop)(f"Events found: {len(event_to_review)}")
 
@@ -126,7 +130,8 @@ class Collector:
             (progress or _noop)(f"New events to collect: {len(new_events)}")
 
             self._download_and_store(
-                new_events, summary, workers=workers, progress=progress
+                new_events, summary, workers=workers, progress=progress,
+                reviewed_by_id=reviewed_by_id,
             )
 
             summary.duration_seconds = (
@@ -241,11 +246,15 @@ class Collector:
         summary: CollectSummary,
         workers: int,
         progress: ProgressFn | None,
+        reviewed_by_id: dict[str, bool | None] | None = None,
     ) -> None:
         done = 0
+        reviewed_by_id = reviewed_by_id or {}
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
             futures = {
-                pool.submit(self._process_event, event_id, review_id): (event_id, review_id)
+                pool.submit(
+                    self._process_event, event_id, review_id, reviewed_by_id
+                ): (event_id, review_id)
                 for event_id, review_id in events
             }
             for future in as_completed(futures):
@@ -328,7 +337,12 @@ class Collector:
                     return True
         return False
 
-    def _process_event(self, event_id: str, review_id: str) -> EventOutcome:
+    def _process_event(
+        self,
+        event_id: str,
+        review_id: str,
+        reviewed_by_id: dict[str, bool | None] | None = None,
+    ) -> EventOutcome:
         """Fetch one event, download clean frame(s), store sample(s).
 
         An event may produce multiple samples when temporal sampling is enabled
@@ -382,6 +396,7 @@ class Collector:
                         debug("phash failed", event_id=event.id, error=str(exc))
 
                 box = event.box
+                reviewed_flag = (reviewed_by_id or {}).get(review_id)
                 sample = Sample(
                     id=sample_id,
                     camera=event.camera,
@@ -400,6 +415,8 @@ class Collector:
                     frigate_y1=box[1] if box else None,
                     frigate_x2=box[2] if box else None,
                     frigate_y2=box[3] if box else None,
+                    frigate_reviewed=(1 if reviewed_flag else 0) if reviewed_flag is not None else None,
+                    reviewed_at=utcnow() if reviewed_flag else None,
                     status="collected",
                 )
                 with self.db.session() as session:

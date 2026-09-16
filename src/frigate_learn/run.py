@@ -2,7 +2,7 @@
 
 ``frigate-learn run`` executes the configured stages in order:
 
-    collect → verify → build → train → benchmark → gate → deploy
+    collect → review-sync → verify → build → train → benchmark → gate → deploy
 
 Each stage registers a skip condition (missing data, missing ML deps, no new
 dataset, etc.) and reports ``executed | skipped | failed`` so a nightly cron can
@@ -13,14 +13,23 @@ flow through a small context dict (e.g. the dataset version built by ``build``).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 from .config import AppConfig
 from .db import Database
 from .logutil import debug, error, info
 
-PIPELINE = ["collect", "verify", "build", "train", "benchmark", "gate", "deploy"]
+PIPELINE = [
+    "collect",
+    "review-sync",
+    "verify",
+    "build",
+    "train",
+    "benchmark",
+    "gate",
+    "deploy",
+]
 
 
 @dataclass
@@ -87,6 +96,7 @@ def run_pipeline(
 
     handlers = {
         "collect": lambda: _step_collect(config, db, days, ctx),
+        "review-sync": lambda: _step_review_sync(config, db, ctx),
         "verify": lambda: _step_verify(config, db, ctx),
         "build": lambda: _step_build(config, db, ctx),
         "train": lambda: _step_train(config, db, ctx),
@@ -126,6 +136,23 @@ def _step_collect(config: AppConfig, db: Database, days: int | None, ctx: dict) 
         status="failed" if summary.error else "executed",
         message=f"new={summary.new_samples} dup={summary.duplicate_samples} "
         f"fail={summary.failures} in {summary.duration_seconds:.1f}s",
+    )
+
+
+def _step_review_sync(config: AppConfig, db: Database, ctx: dict) -> StepReport:
+    from .collection.review_sync import ReviewSyncer
+
+    now = datetime.now(UTC)
+    from_ts = now - timedelta(days=config.collection.default_days)
+    syncer = ReviewSyncer(config, db)
+    summary = syncer.sync(from_ts=from_ts.timestamp(), to_ts=now.timestamp())
+    ctx["review_sync"] = summary
+    return StepReport(
+        name="review-sync",
+        status="failed" if summary.error else "executed",
+        message=f"seen={summary.reviews_seen} matched={summary.samples_matched} "
+        f"changed={summary.flags_changed} auto_useful={summary.auto_useful} "
+        f"in {summary.duration_seconds:.1f}s",
     )
 
 

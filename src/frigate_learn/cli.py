@@ -11,7 +11,7 @@ Implemented commands (P1):
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import click
@@ -399,6 +399,71 @@ def triage_batch(
         limit=limit, clear=clear,
     )
     click.echo(f"Updated {updated} sample(s).")
+
+
+# --- review-sync ------------------------------------------------------------
+#
+# The Frigate Review UI is the human-confirmation channel: operators mark
+# events reviewed/unreviewed there, and review-sync ingests that state.
+
+
+@cli.command("review-sync")
+@click.option("--from", "from_arg", default=None, help="Start time: '7 days ago', '2026-09-01', ISO, ...")
+@click.option("--to", default=None, help="End time (default: now).")
+@click.option("--days", type=int, default=None, help="Sync the last N days (alternative to --from).")
+@click.option("--camera", "cameras", multiple=True, help="Camera name (repeatable).")
+@click.option("--severity", "severities", multiple=True,
+              type=click.Choice(["alert", "detection"]), help="Severity (repeatable).")
+@click.option("--no-auto-useful", "no_auto_useful", is_flag=True, default=False,
+              help="Store the reviewed flag but do not auto-triage reviewed samples to useful.")
+@click.pass_context
+def review_sync(
+    ctx: click.Context,
+    from_arg: str | None,
+    to: str | None,
+    days: int | None,
+    cameras: tuple[str, ...],
+    severities: tuple[str, ...],
+    no_auto_useful: bool,
+) -> None:
+    """Pull Frigate review state (has_been_reviewed) onto local samples.
+
+    Runs after `collect`; re-running is idempotent. The Frigate user matching
+    the token must be the account that marks reviews in the Frigate UI.
+    """
+    from .collection.review_sync import ReviewSyncer
+
+    config = _load_config(ctx)
+    if no_auto_useful:
+        config.collection.review_auto_useful = False
+
+    now = datetime.now(UTC).timestamp()
+    if from_arg is not None:
+        from_ts = parse_time_arg(from_arg)
+    elif days is not None:
+        from_ts = (datetime.now(UTC) - timedelta(days=days)).timestamp()
+    else:
+        from_ts = now - timedelta(days=config.collection.default_days).total_seconds()
+    to_ts = parse_time_arg(to) if to is not None else None
+    if to_ts is not None and to_ts <= from_ts:
+        raise click.ClickException("--to must be after --from")
+
+    database = _db(config)
+    database.migrate()
+    syncer = ReviewSyncer(config, database)
+    summary = syncer.sync(
+        from_ts=from_ts,
+        to_ts=to_ts,
+        cameras=list(cameras) or None,
+        severity=list(severities) or None,
+    )
+    click.echo(
+        f"reviews={summary.reviews_found} seen={summary.reviews_seen} "
+        f"matched={summary.samples_matched} changed={summary.flags_changed} "
+        f"auto_useful={summary.auto_useful}"
+    )
+    if summary.error:
+        raise click.ClickException(f"review-sync failed: {summary.error}")
 
 
 # --- verification ----------------------------------------------------------

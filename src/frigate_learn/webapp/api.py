@@ -65,12 +65,13 @@ def register_routes(app: FastAPI) -> None:
         quality: str | None = None,
         camera: str | None = None,
         verified: int | None = None,
+        reviewed: int | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> dict:
         return queries.samples(
             db, status=status, quality=quality, camera=camera,
-            verified=verified, limit=limit, offset=offset,
+            verified=verified, reviewed=reviewed, limit=limit, offset=offset,
         )
 
     @app.get("/api/samples/{sample_id}", response_model=None)

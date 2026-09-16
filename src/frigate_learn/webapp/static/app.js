@@ -520,7 +520,7 @@ async function renderBenchmark(sec) {
     const table = h("table");
     table.innerHTML = `
       <thead><tr><th>model</th><th>version</th><th>mAP50</th><th>mAP50-95</th>
-      <th>recall</th><th>latency ms</th><th>cpu %</th><th>verdict</th></tr></thead>
+      <th>recall</th><th>fp rate</th><th>latency ms</th><th>cpu %</th><th>verdict</th></tr></thead>
       <tbody></tbody>`;
     const tbody = table.querySelector("tbody");
     for (const r of results) {
@@ -535,6 +535,7 @@ async function renderBenchmark(sec) {
         <td>${num(m.map50)}</td>
         <td>${num(m.map50_95)}</td>
         <td>${num(m.recall)}</td>
+        <td>${num(m.false_positive_rate)}</td>
         <td>${num(m.latency_ms, 1) || "—"}</td>
         <td>${num(m.cpu_percent, 1) || "—"}</td>
         <td><span class="verdict ${(verdict || "none").toLowerCase()}">${esc(verdict || "—")}</span></td>`;
@@ -594,6 +595,8 @@ async function renderQuality(sec) {
   cards.appendChild(countCard("Samples", data.total, `one-class boxes ${data.one_class_boxes}`));
   cards.appendChild(countCard("Verified", data.verified, `problematic ${data.problematic}`));
   cards.appendChild(countCard("Unverified", data.unverified, "awaiting review"));
+  cards.appendChild(countCard("Frigate-reviewed", data.reviewed, "human-confirmed in Frigate Review UI"));
+  cards.appendChild(countCard("Frigate-unreviewed", data.unreviewed, "not yet confirmed by a human"));
   for (const q of QUALITIES) {
     cards.appendChild(countCard(q, data.by_quality[q] ?? 0, "quality verdict"));
   }
@@ -806,7 +809,7 @@ async function renderTrainingDetail(sec, run) {
 }
 
 const triageState = {
-  quality: "", status: "", camera: "", verified: false,
+  quality: "", status: "", camera: "", verified: false, reviewed: "",
   samples: [], statuses: new Set(), cameras: [], seeded: false, list: [], idx: 0,
 };
 
@@ -841,6 +844,8 @@ async function renderTriage(sec) {
   vbox.appendChild(vcheck);
   vbox.appendChild(document.createTextNode(" verified only"));
   bar.appendChild(vbox);
+  bar.appendChild(filterSelect("reviewed", ["reviewed", "unreviewed"], triageState.reviewed,
+    (v) => { triageState.reviewed = v; loadTriageGrid(); }));
   sec.appendChild(bar);
 
   triageState.grid = h("div", "thumb-grid");
@@ -874,6 +879,8 @@ function samplesQuery() {
   if (triageState.status) p.set("status", triageState.status);
   if (triageState.camera) p.set("camera", triageState.camera);
   if (triageState.verified) p.set("verified", 1);
+  if (triageState.reviewed === "reviewed") p.set("reviewed", 1);
+  if (triageState.reviewed === "unreviewed") p.set("reviewed", 0);
   p.set("limit", 200);
   return "/api/samples?" + p.toString();
 }
@@ -904,6 +911,7 @@ async function loadTriageGrid() {
         thumb.appendChild(h("div", "noimg", "no image"));
       }
       if (s.verified) thumb.appendChild(h("div", "badge-verify", "✓"));
+      if (s.reviewed === 1) thumb.appendChild(h("div", "badge-review", "R"));
       const meta = h("div", "meta");
       meta.appendChild(document.createTextNode(
         `${s.camera || "—"} · ${s.label || "—"} · ${num(s.score, 2)} · `));
@@ -956,6 +964,8 @@ async function renderLightbox() {
   meta.appendChild(h("span", null, item.label || "—"));
   meta.appendChild(h("span", null, fmtTs(item.timestamp)));
   meta.appendChild(pillNode(item.quality || "unset", item.quality));
+  const revTxt = item.reviewed === 1 ? "reviewed" : item.reviewed === 0 ? "unreviewed" : "";
+  if (revTxt) meta.appendChild(pillNode(revTxt, item.reviewed === 1 ? "rev" : "unrev"));
 
   const qbar = h("div", "lightbox-qual");
   for (const q of QUALITIES) {

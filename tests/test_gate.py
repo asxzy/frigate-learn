@@ -15,12 +15,12 @@ from frigate_learn.evaluation.gate import (
 from frigate_learn.evaluation.metrics import DetectionMetrics
 
 
-def _result(name, map50=0.5, recall=0.6, latency=5.0) -> CandidateResult:
+def _result(name, map50=0.5, recall=0.6, latency=5.0, fpr=0.05) -> CandidateResult:
     return CandidateResult(
         name=name,
         metrics=DetectionMetrics(
             precision=0.5, recall=recall, f1=0.5, map50=map50, map50_95=0.3,
-            small_object_recall=0.1, false_positive_rate=0.05, latency_ms=latency,
+            small_object_recall=0.1, false_positive_rate=fpr, latency_ms=latency,
         ),
         version="golden-v001",
         kind="golden",
@@ -68,6 +68,29 @@ def test_fails_on_map50_regression():
     baseline = _result("yolov8l", map50=0.6, recall=0.6)
     candidate = _result("yolov8n", map50=0.5, recall=0.6)  # -0.10 < -0.01
     gate = evaluate_gate(candidate, _limits(), baseline)
+    assert gate.passed is False
+
+
+def test_fails_on_fp_rate_regression_above_floor():
+    baseline = _result("yolov8l", fpr=0.05)
+    candidate = _result("yolov8n", fpr=0.30)  # +0.25 > +0.05
+    gate = evaluate_gate(candidate, _limits(), baseline)
+    assert gate.passed is False
+    assert any("fp rate regressed" in r for r in gate.reasons)
+
+
+def test_fp_rate_within_delta_passes():
+    baseline = _result("yolov8l", fpr=0.05)
+    candidate = _result("yolov8n", fpr=0.10)  # +0.05 <= +0.05
+    gate = evaluate_gate(candidate, _limits(), baseline)
+    assert gate.passed is True
+    assert any("fp rate" in r for r in gate.reasons)
+
+
+def test_fp_rate_floor_configurable():
+    baseline = _result("yolov8l", fpr=0.05)
+    candidate = _result("yolov8n", fpr=0.20)  # +0.15 > +0.10
+    gate = evaluate_gate(candidate, _limits(max_fp_rate_delta=0.10), baseline)
     assert gate.passed is False
 
 

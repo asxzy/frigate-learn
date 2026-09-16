@@ -48,6 +48,11 @@ collection:
   # collection. region_crop_height falls back to training.image_size when null.
   region_crop: true
   region_crop_height: null
+  # review-sync policy: if the operator marks a Frigate review segment as
+  # reviewed in Frigate's own Review UI, samples under that segment get
+  # quality=useful when they have no explicit verdict yet (the raw flag is
+  # always mirrored into samples.frigate_reviewed).
+  review_auto_useful: true
 
 sampling:
   # P3 - temporal sampling within an event. Off by default; when enabled,
@@ -104,6 +109,10 @@ deployment:
   min_recall_delta: -0.01
   min_map50_delta: -0.01
   max_cpu_percent: 80
+  # FP-rate regression floor: a candidate may not exceed the baseline
+  # false_positive_rate by more than this (absolute). Blocks recall-chasing
+  # models that deploy more false positives.
+  max_fp_rate_delta: 0.05
   # name (in evaluation.candidates) treated as the incumbent the gate compares
   # candidates against. Gate PASS requires a candidate to stay within all deltas
   # of this model.

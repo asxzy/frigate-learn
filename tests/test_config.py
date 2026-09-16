@@ -25,6 +25,8 @@ def test_defaults():
     assert "person" in cfg.classes
     assert cfg.collection.region_crop is False
     assert cfg.collection.region_crop_height is None
+    assert cfg.collection.review_auto_useful is True
+    assert cfg.deployment.max_fp_rate_delta == 0.05
     assert cfg.training.label_space == "coco80"
 
 
@@ -33,6 +35,7 @@ def test_build_config_maps_sections():
         "classes": ["person", "car"],
         "frigate": {"base_url": "http://cam:8971/", "token": "t"},
         "collection": {"cameras": "front,gate", "severity": ["detection"], "concurrency": 3},
+        "deployment": {"max_fp_rate_delta": 0.12},
         "data": {"root": "var"},
     }
     cfg = build_config(raw, base_dir=Path("/tmp/x"))
@@ -41,17 +44,20 @@ def test_build_config_maps_sections():
     assert cfg.collection.cameras == ["front", "gate"]
     assert cfg.collection.severity == ["detection"]
     assert cfg.collection.concurrency == 3
+    assert cfg.deployment.max_fp_rate_delta == 0.12
 
 
 def test_collection_region_crop_settings():
     raw = {
         "classes": ["person"],
-        "collection": {"region_crop": False, "region_crop_height": 512},
+        "collection": {"region_crop": False, "region_crop_height": 512,
+                       "review_auto_useful": False},
         "data": {"root": "var"},
     }
     cfg = build_config(raw, base_dir=Path("/tmp/x"))
     assert cfg.collection.region_crop is False
     assert cfg.collection.region_crop_height == 512
+    assert cfg.collection.review_auto_useful is False
     assert cfg.data.root == "var"
     assert cfg.base_dir == Path("/tmp/x").resolve()
 

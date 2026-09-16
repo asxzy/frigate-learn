@@ -7,6 +7,7 @@ import os
 from PIL import Image
 
 from frigate_learn.collection.collector import CollectSummary
+from frigate_learn.collection.review_sync import ReviewSyncSummary
 from frigate_learn.models import Annotation, Sample, utcnow
 from frigate_learn.run import PIPELINE, next_build_version, run_pipeline
 
@@ -126,8 +127,32 @@ def test_run_keep_going_continues_past_failure(config, db, tmp_path, monkeypatch
 
 def test_pipeline_steps_registry_is_ordered():
     assert PIPELINE == [
-        "collect", "verify", "build", "train", "benchmark", "gate", "deploy"
+        "collect", "review-sync", "verify", "build", "train", "benchmark", "gate", "deploy"
     ]
+
+
+class FakeReviewSyncer:
+    def __init__(self, config, db):
+        self.client = type("C", (), {"close": lambda self: None})()
+
+    def sync(self, from_ts, to_ts=None, cameras=None, severity=None,
+             auto_useful=None, progress=None):
+        return ReviewSyncSummary(
+            reviews_found=2, reviews_seen=2, samples_matched=1,
+            flags_changed=1, auto_useful=1, job_id="rev1", duration_seconds=0.05,
+        )
+
+
+def test_run_review_sync_step_executes(config, db, monkeypatch):
+    monkeypatch.setattr(
+        "frigate_learn.collection.review_sync.ReviewSyncer", FakeReviewSyncer
+    )
+    reports = run_pipeline(config, db, steps=["review-sync"], dry_run=True)
+    assert len(reports) == 1
+    report = reports[0]
+    assert report.name == "review-sync"
+    assert report.status == "executed"
+    assert "auto_useful=1" in report.message
 
 
 def test_latest_trained_run_none_when_training_dir_missing(config, tmp_path):

@@ -61,6 +61,10 @@ class CollectionSettings:
     # parity.
     region_crop: bool = False
     region_crop_height: int | None = None
+    # review-sync policy: when a sample's Frigate review segment is marked
+    # reviewed (human confirmed it in Frigate's Review UI) and the sample has
+    # no explicit local verdict, auto-triage it to useful.
+    review_auto_useful: bool = True
 
 
 @dataclass
@@ -119,6 +123,10 @@ class DeploymentSettings:
     min_recall_delta: float = -0.01
     min_map50_delta: float = -0.01
     max_cpu_percent: float = 80.0
+    # FP-rate regression floor vs baseline: a candidate may not exceed the
+    # baseline false_positive_rate by more than this (absolute). Guards
+    # against deploying models that boost recall/mAP by firing everywhere.
+    max_fp_rate_delta: float = 0.05
     baseline: str = "yolov8l"        # candidate name treated as the deployment baseline
 
 
@@ -307,6 +315,9 @@ def build_config(raw: dict[str, Any], base_dir: Path) -> AppConfig:
     cfg.collection.region_crop_height = _as_optional_int(
         _pop(col, "region_crop_height", None)
     )
+    cfg.collection.review_auto_useful = bool(
+        _pop(col, "review_auto_useful", cfg.collection.review_auto_useful)
+    )
 
     samp = _section(raw, "sampling")
     cfg.sampling.enabled = bool(_pop(samp, "enabled", cfg.sampling.enabled))
@@ -383,6 +394,9 @@ def build_config(raw: dict[str, Any], base_dir: Path) -> AppConfig:
     )
     cfg.deployment.max_cpu_percent = float(
         _pop(dep, "max_cpu_percent", cfg.deployment.max_cpu_percent)
+    )
+    cfg.deployment.max_fp_rate_delta = float(
+        _pop(dep, "max_fp_rate_delta", cfg.deployment.max_fp_rate_delta)
     )
     cfg.deployment.baseline = str(_pop(dep, "baseline", cfg.deployment.baseline))
 

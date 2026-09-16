@@ -4,6 +4,7 @@ A candidate passes only when it stays inside the deployment envelope:
 - latency <= ``deployment.max_latency_ms``
 - recall not worse than the baseline by more than ``min_recall_delta``
 - mAP50 not worse than the baseline by more than ``min_map50_delta``
+- FP rate not worse than the baseline by more than ``max_fp_rate_delta``
 - CPU (when measured) <= ``max_cpu_percent``
 
 With no baseline (first deploy), the metric deltas are skipped and the gate is
@@ -91,6 +92,20 @@ def evaluate_gate(
         else:
             reasons.append(
                 f"mAP50 regressed {map50_delta:+.3f} below floor {limits.min_map50_delta:+.3f}"
+            )
+            ok = False
+        fp_delta = (
+            candidate.metrics.false_positive_rate
+            - baseline.metrics.false_positive_rate
+        )
+        if fp_delta <= limits.max_fp_rate_delta:
+            reasons.append(
+                f"fp rate {candidate.metrics.false_positive_rate:.3f} vs "
+                f"{baseline.metrics.false_positive_rate:.3f} (delta {fp_delta:+.3f})"
+            )
+        else:
+            reasons.append(
+                f"fp rate regressed {fp_delta:+.3f} above floor +{limits.max_fp_rate_delta:.3f}"
             )
             ok = False
 

@@ -33,9 +33,25 @@ def test_migrations_idempotent(db):
 
 def test_applied_and_pending(db):
     applied = db.applied_migrations()
-    assert len(applied) == 2
-    assert applied == ["0001_initial.sql", "0002_multiframe_phash.sql"]
-    assert db.schema_version() == 2
+    assert len(applied) == 3
+    assert applied == [
+        "0001_initial.sql",
+        "0002_multiframe_phash.sql",
+        "0003_review_sync.sql",
+    ]
+    assert db.schema_version() == 3
+
+
+def test_0003_adds_review_sync_columns(db):
+    from sqlalchemy import text
+
+    with db.engine.connect() as conn:
+        cols = {
+            row[1]
+            for row in conn.execute(text("PRAGMA table_info(samples)"))
+        }
+    for column in ("frigate_reviewed", "reviewed_at"):
+        assert column in cols
 
 
 def test_0002_adds_sampling_columns(db):

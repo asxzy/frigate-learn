@@ -1,7 +1,7 @@
 # Notes — Agent Context
 
 This file exists so agents can quickly restore project context across sessions.
-Last updated: 2026-09-11
+Last updated: 2026-09-15
 
 ## What This Project Is
 
@@ -15,11 +15,11 @@ benchmarks/gates against an immutable golden dataset, and deploys winners to Hai
 ## At a Glance
 
 - **v0.2.0** | MIT | author: asxzy
-- **340 tests passing** (12.5s)
-- **47 Python source files, ~7800 LOC**
-- **2 SQLite migrations**
+- **363 tests passing** (7.8s)
+- **48 Python source files, ~7900 LOC**
+- **3 SQLite migrations**
 - **16 FastAPI endpoints + 6-view vanilla-JS SPA**
-- **7 pipeline stages:** collect → verify → build → train → benchmark → gate → deploy
+- **8 pipeline stages:** collect → review-sync → verify → build → train → benchmark → gate → deploy
 - **Branch:** `master`, 29 commits ahead of origin
 
 ## Architecture
@@ -40,6 +40,7 @@ Frigate VM (N150 + Hailo-8)
   ↕ HTTP (collector only)
 Training Machine
   collect (reviews→events→snapshots→SQLite)
+  review-sync (Frigate Review UI state → samples.frigate_reviewed, auto-useful)
   verify  (VLM annotation via OpenAI-compatible endpoint)
   build   (frozen dataset version with deterministic splits)
   train   (YOLO fine-tune, before/after golden evaluation)
@@ -53,7 +54,7 @@ Training Machine
 ```
 src/frigate_learn/
 ├── __init__.py          (11)  v0.2.0, exports AppConfig/load_config
-├── cli.py               (906) All subcommands (db, collect, status, inspect, triage, verify, dataset, discover, import-coco, benchmark, train, gate, deploy, run, web)
+├── cli.py               (1006) All subcommands (db, collect, review-sync, status, inspect, triage, verify, dataset, discover, import-coco, benchmark, train, gate, deploy, run, web)
 ├── config.py            (421) AppConfig + 9 settings dataclasses, YAML + env interpolation
 ├── db.py                (153) Database class, migration runner, schema_migrations table
 ├── models.py            (127) ORM: Sample, Annotation, Job, CollectionFailure, DiscoveryWindow, Deployment
@@ -62,7 +63,8 @@ src/frigate_learn/
 ├── run.py               (307) PIPELINE orchestrator, StepReport, next_build_version
 
 ├── collection/
-│   ├── collector.py     (496) Collector: reviews→events→snapshots→Samples, ThreadPoolExecutor, dedup, region crop
+│   ├── collector.py     (502) Collector: reviews→events→snapshots→Samples, ThreadPoolExecutor, dedup, region crop, review flag stamp
+│   ├── review_sync.py   (191) ReviewSyncer: Frigate has_been_reviewed → samples.frigate_reviewed (+auto-useful policy)
 │   ├── dedup.py          (59) dHash perceptual hashing + Hamming distance
 │   ├── discover.py      (151) P9: motion windows without collected evidence
 │   ├── external.py      (182) P10: COCO import → external samples
@@ -114,7 +116,8 @@ src/frigate_learn/
 
 └── migrations/
     ├── 0001_initial.sql (72)  samples, annotations, jobs, collection_failures
-    └── 0002_multiframe_phash.sql (47)  frame_index, perceptual_hash, verified, discovery_windows, deployments
+    ├── 0002_multiframe_phash.sql (47)  frame_index, perceptual_hash, verified, discovery_windows, deployments
+    └── 0003_review_sync.sql (14)  samples.frigate_reviewed, samples.reviewed_at
 ```
 
 ## Data Layout (runtime)

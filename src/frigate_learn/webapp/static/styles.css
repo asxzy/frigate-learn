@@ -178,6 +178,8 @@ td.mono, .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .pill.duplicate { color: var(--amber); border-color: var(--amber); background: #2a2210; }
 .pill.ignore, .pill.skipped { color: var(--muted); border-color: var(--gray); background: var(--panel); }
 .pill.running { color: var(--blue); border-color: var(--blue); background: #0d1d2b; }
+.pill.rev { color: var(--lime); border-color: var(--green); background: #10261a; }
+.pill.unrev { color: var(--amber); border-color: var(--amber); background: #2a2210; }
 
 .verdict.pass { color: var(--lime); font-weight: 700; }
 .verdict.fail { color: var(--red); font-weight: 700; }
@@ -246,6 +248,7 @@ button.btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .thumb .pill { font-size: 11px; margin-left: 4px; }
 
 .thumb .badge-verify { position: absolute; top: 6px; right: 6px; color: var(--lime); font-weight: 700; font-size: 13px; text-shadow: 0 0 4px #000; }
+.thumb .badge-review { position: absolute; top: 6px; right: 24px; color: var(--blue); font-weight: 700; font-size: 11px; text-shadow: 0 0 4px #000; }
 
 .filter-bar {
   display: flex;

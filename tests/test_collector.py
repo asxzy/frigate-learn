@@ -108,6 +108,39 @@ def _event(e_id: str, camera: str, label: str, start: float,
     }
 
 
+def test_reviewed_flag_stored_on_collect(config, db):
+    config.collection.region_crop = False
+    review = _review("r1", "front", 200, ["e1"])
+    review["has_been_reviewed"] = True
+    fake = FakeFrigate(
+        reviews_raw=[review],
+        events_raw={"e1": _event("e1", "front", "person", 200)},
+    )
+    collector = Collector(config, db, client=fake)
+    collector.collect(from_ts=0)
+
+    with db.session() as s:
+        row = s.query(Sample).one()
+    assert row.frigate_reviewed == 1
+    assert row.reviewed_at
+
+
+def test_reviewed_flag_unset_on_collect(config, db):
+    config.collection.region_crop = False
+    review = _review("r1", "front", 200, ["e1"])
+    review["has_been_reviewed"] = False
+    fake = FakeFrigate(
+        reviews_raw=[review],
+        events_raw={"e1": _event("e1", "front", "person", 200)},
+    )
+    Collector(config, db, client=fake).collect(from_ts=0)
+
+    with db.session() as s:
+        row = s.query(Sample).one()
+    assert row.frigate_reviewed == 0
+    assert row.reviewed_at is None
+
+
 def test_happy_path(config, db, tmp_path):
     config.collection.region_crop = False
     fake = FakeFrigate(

@@ -37,6 +37,7 @@ def test_db_migrate_and_status(dbenv):
     assert migrate.exit_code == 0
     assert "0001_initial.sql" in migrate.output
     assert "0002_multiframe_phash.sql" in migrate.output
+    assert "0003_review_sync.sql" in migrate.output
 
     status = runner.invoke(cli, ["status"], env=dbenv)
     assert status.exit_code == 0
@@ -106,6 +107,50 @@ def test_collect_bad_severity(dbenv, monkeypatch):
     result = CliRunner().invoke(cli, ["collect", "--severity", "bogus"], env=dbenv)
     assert result.exit_code != 0
     assert "bogus" in result.output.lower() or "invalid" in result.output.lower()
+
+
+def test_review_sync_output(dbenv, monkeypatch):
+    from types import SimpleNamespace
+
+    class FakeSyncer:
+        def __init__(self, config, database):
+            pass
+
+        def sync(self, from_ts, to_ts=None, cameras=None, severity=None,
+                 auto_useful=None):
+            return SimpleNamespace(
+                reviews_found=3, reviews_seen=2, samples_matched=4,
+                flags_changed=2, auto_useful=1, error=None,
+            )
+
+    monkeypatch.setattr("frigate_learn.collection.review_sync.ReviewSyncer", FakeSyncer)
+    result = CliRunner().invoke(cli, ["review-sync", "--from", "1 day ago"], env=dbenv)
+    assert result.exit_code == 0
+    assert "reviews=3" in result.output
+    assert "seen=2" in result.output
+    assert "auto_useful=1" in result.output
+
+
+def test_review_sync_no_auto_useful(dbenv, monkeypatch):
+    from types import SimpleNamespace
+
+    captured = {}
+
+    class RecordingSyncer:
+        def __init__(self, config, database):
+            captured["auto_useful"] = config.collection.review_auto_useful
+
+        def sync(self, from_ts, to_ts=None, cameras=None, severity=None,
+                 auto_useful=None):
+            return SimpleNamespace(
+                reviews_found=0, reviews_seen=0, samples_matched=0,
+                flags_changed=0, auto_useful=0, error=None,
+            )
+
+    monkeypatch.setattr("frigate_learn.collection.review_sync.ReviewSyncer", RecordingSyncer)
+    result = CliRunner().invoke(cli, ["review-sync", "--no-auto-useful"], env=dbenv)
+    assert result.exit_code == 0
+    assert captured["auto_useful"] is False
 
 
 def test_run_pipeline_smoke(dbenv):

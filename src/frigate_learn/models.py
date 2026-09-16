@@ -41,6 +41,8 @@ class Sample(Base):
     frigate_y1: Mapped[float | None] = mapped_column(Float, nullable=True)
     frigate_x2: Mapped[float | None] = mapped_column(Float, nullable=True)
     frigate_y2: Mapped[float | None] = mapped_column(Float, nullable=True)
+    frigate_reviewed: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    reviewed_at: Mapped[str | None] = mapped_column(Text, nullable=True)
     quality: Mapped[str | None] = mapped_column(Text, nullable=True)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="collected")
     created_at: Mapped[str] = mapped_column(Text, nullable=False, default=utcnow)

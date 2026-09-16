@@ -270,6 +270,8 @@ def test_overview(seeded):
         "total": 3,
         "verified": 1,
         "unverified": 2,
+        "reviewed": 0,
+        "unreviewed": 0,
         "quality_useful": 1,
         "quality_bad": 1,
         "quality_duplicate": 0,
@@ -1107,6 +1109,80 @@ def test_api_samples_filters(tmp_path):
     r = c.get("/api/samples?status=reviewed")
     assert r.status_code == 200
     assert r.json()["total"] == 1
+
+
+def test_api_samples_reviewed_filter(tmp_path):
+    cfg = build_config({"data": {"root": "data"}}, tmp_path)
+    db = Database(cfg.database_path())
+    db.init()
+    with db.session() as s:
+        s.add_all(
+            [
+                Sample(id="a", camera="front", timestamp=1.0, frigate_reviewed=1,
+                       status="collected"),
+                Sample(id="b", camera="front", timestamp=2.0, frigate_reviewed=0,
+                       status="collected"),
+                Sample(id="c", camera="front", timestamp=3.0, status="collected"),
+            ]
+        )
+        s.commit()
+    db.dispose()
+    c = TestClient(create_app(cfg))
+    reviewed = c.get("/api/samples?reviewed=1")
+    assert reviewed.status_code == 200
+    assert reviewed.json()["total"] == 1
+    assert reviewed.json()["samples"][0]["id"] == "a"
+    assert reviewed.json()["samples"][0]["reviewed"] == 1
+    unreviewed = c.get("/api/samples?reviewed=0")
+    assert unreviewed.json()["total"] == 1
+    assert unreviewed.json()["samples"][0]["id"] == "b"
+
+
+def test_api_quality_reviewed_counts(tmp_path):
+    cfg = build_config({"data": {"root": "data"}}, tmp_path)
+    db = Database(cfg.database_path())
+    db.init()
+    with db.session() as s:
+        s.add_all(
+            [
+                Sample(id="a", camera="front", timestamp=1.0, frigate_reviewed=1,
+                       status="collected"),
+                Sample(id="b", camera="front", timestamp=2.0, frigate_reviewed=0,
+                       status="collected"),
+            ]
+        )
+        s.commit()
+    db.dispose()
+    c = TestClient(create_app(cfg))
+    r = c.get("/api/quality")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["reviewed"] == 1
+    assert body["unreviewed"] == 1
+
+
+def test_queries_samples_reviewed_filter(tmp_path):
+    cfg = build_config({}, tmp_path)
+    db = Database(cfg.database_path())
+    db.init()
+    with db.session() as s:
+        s.add_all(
+            [
+                Sample(id="a", camera="front", timestamp=1.0, frigate_reviewed=1,
+                       status="collected"),
+                Sample(id="b", camera="front", timestamp=2.0, frigate_reviewed=0,
+                       status="collected"),
+                Sample(id="c", camera="front", timestamp=3.0, status="collected"),
+            ]
+        )
+        s.commit()
+    by_id = {x["id"]: x for x in queries.samples(db)["samples"]}
+    assert by_id["a"]["reviewed"] == 1
+    assert by_id["b"]["reviewed"] == 0
+    assert by_id["c"]["reviewed"] is None
+    assert [x["id"] for x in queries.samples(db, reviewed=1)["samples"]] == ["a"]
+    assert [x["id"] for x in queries.samples(db, reviewed=0)["samples"]] == ["b"]
+    db.dispose()
 
 
 def test_api_sample_detail(tmp_path):

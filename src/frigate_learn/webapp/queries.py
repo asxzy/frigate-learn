@@ -51,6 +51,8 @@ def overview(config, db) -> dict:
             "total": counts["total"],
             "verified": counts["verified"],
             "unverified": counts["unverified"],
+            "reviewed": counts["reviewed"],
+            "unreviewed": counts["unreviewed"],
             **{f"quality_{q}": counts["by_quality"][q] for q in sorted(QUALITY_VALUES)},
         },
         "cameras": cameras,
@@ -122,6 +124,18 @@ def quality_counts(db) -> dict:
             .all()
         ):
             by_quality[quality] = count
+        reviewed = (
+            session.query(func.count(Sample.id))
+            .filter(Sample.frigate_reviewed == 1)
+            .scalar()
+            or 0
+        )
+        unreviewed = (
+            session.query(func.count(Sample.id))
+            .filter(Sample.frigate_reviewed == 0)
+            .scalar()
+            or 0
+        )
         per_class = {
             label: count
             for label, count in (
@@ -148,6 +162,8 @@ def quality_counts(db) -> dict:
         "total": total,
         "verified": verified,
         "unverified": total - verified,
+        "reviewed": reviewed,
+        "unreviewed": unreviewed,
         "by_quality": by_quality,
         "per_class": per_class,
         "one_class_boxes": one_class_boxes,
@@ -232,6 +248,7 @@ def samples(
     quality=None,
     camera=None,
     verified=None,
+    reviewed=None,
     limit=50,
     offset=0,
 ) -> dict:
@@ -247,6 +264,8 @@ def samples(
             query = query.filter(Sample.camera == camera)
         if verified is not None:
             query = query.filter(Sample.verified == int(verified))
+        if reviewed is not None:
+            query = query.filter(Sample.frigate_reviewed == int(reviewed))
         total = query.count()
         rows = (
             query.order_by(Sample.timestamp.desc(), Sample.id)
@@ -449,6 +468,8 @@ def _sample_item(sample, has_annotations: bool) -> dict:
         "quality": sample.quality,
         "status": sample.status,
         "verified": sample.verified,
+        "reviewed": sample.frigate_reviewed,
+        "reviewed_at": sample.reviewed_at,
         "has_image": has_image,
         "has_annotations": has_annotations,
     }
