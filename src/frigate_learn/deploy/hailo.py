@@ -9,13 +9,17 @@ Turn a trained candidate into a deployable Frigate artifact:
            hailo optimize <net>.har --hw-arch <arch> --calib-set-path calib.npy
            hailo compiler <net>_optimized.har --hw-arch <arch> --output-dir .
 
-       The conversion is fully host-side: no Hailo device is ever needed to
-       produce the HEF (a device is only required to *run* it). The Dataflow
-       Compiler only runs on x86-64 Linux, so on macOS the three stages run
-       inside a docker image (``hailo.docker_image``, see
-       ``containers/hailo-dfc/`` and ``docs/hailo-deploy.md``). With ``-y`` the
-       DFC parser auto-detects ultralytics-style detection heads and appends
-       the on-device NMS post-process that Frigate's Hailo detector expects.
+        The conversion is fully host-side: no Hailo device is ever needed to
+        produce the HEF (a device is only required to *run* it). The Dataflow
+        Compiler only runs on x86-64 Linux, so on macOS the three stages run
+        inside a docker image (``hailo.docker_image``, see
+        ``containers/hailo-dfc/`` and ``docs/hailo-deploy.md``). With ``-y`` the
+        DFC parser auto-detects ultralytics-style detection heads and appends
+        ``nms_postprocess`` to the stored model script, which ``optimize``
+        applies *before quantization* — the required placement for embedding
+        net-flow NMS metadata into the HEF. Injecting it only to
+        ``hailo compiler`` silently produces an external postprocess ONNX that
+        HailoRT 4.21 (Frigate's pinned runtime) ignores.
     3. write the model manifest + a ready-to-paste Frigate detector config snippet
     4. record the deployment row in SQLite
 

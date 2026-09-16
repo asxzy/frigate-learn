@@ -69,9 +69,27 @@ Three DFC stages, run in the model dir (`calib.npy` is built from
 ```bash
 hailo parser onnx best.onnx --net-name best --hw-arch hailo8 -y
 hailo optimize best.har --hw-arch hailo8 --calib-set-path calib.npy \
-    --output-har-path best_optimized.har
+    --model-script nms.alls --output-har-path best_optimized.har
 hailo compiler best_optimized.har --hw-arch hailo8 --output-dir .
 ```
+
+The `-y` flag at `parser` auto-detects the ultralytics-style detection head
+and appends `nms_postprocess(...)` to the stored model script, which `optimize`
+then applies. When auto-detection misses the head (fine-tuned renames, or the
+yolov9 RepConv-y variant), inject the NMS explicitly with a `--model-script` at
+the `optimize` stage as shown.
+
+`nms.alls` is a one-line model script that injects the detection-head NMS the
+Frigate detector needs:
+
+```text
+nms_postprocess("nms_config.json", meta_arch=yolov8)
+```
+
+with `nms_config.json` describing the head (image 320x320, 80 classes, the
+yolov9 family uses `regression_length: 16`, and DFL-style scalar-per-stride
+bbox decoders). See `data/models/yolov9s/nms-compile/nms.alls` +
+`nms_config.json` for a known-good pair.
 
 Run it:
 
@@ -87,20 +105,32 @@ Outputs in `data/models/yolov9s/`: `best.hef` (renamed to the model dir as
 
 Frigate's Hailo detector (`frigate/detectors/plugins/hailo.py`) expects **NMS
 post-processed, per-class detections** (`[x1, y1, x2, y2, score]` per class),
-not raw tensor outputs. The `-y` flag makes the DFC parser auto-detect the
-ultralytics-style detection head on your export, re-parse at the raw head
-convs, and append `nms_postprocess(...)` to the model script — so the HEF
-comes out with **on-device NMS**, which is exactly what Frigate consumes. A
-plain raw-tensor HEF (e.g. compiled with a generic tool without this step)
-will load but produce garbage detection arrays in Frigate.
+not raw tensor outputs. The DFC must embed that NMS **inside the HEF as
+net-flow metadata** (`HAILO_NET_FLOW`, `HAILO_NET_FLOW_YOLOV8_NMS`,
+`postprocess_output_layer` strings in the file, produced when `nms_metadata`
+is set with `engine=cpu`); HailoRT 4.21 (what Frigate pins) then exposes a
+single `yolov8_nms_postprocess` output stream (e.g. shape `[40080]` =
+80 classes x 5 fields x 100 proposals) that the plugin reads. A raw-tensor HEF
+loads fine but produces garbage detection arrays.
 
-If your export isn't auto-detected (non-ultralytics layout, or the parser
-prints node recommendations), follow the parser's suggested
-`--start-node-names/--end-node-names`, then re-run; failing that, the Hailo
-Model Zoo **v2.19.0** route (`hailomz parse/optimize/compile` with a network
-YAML modeled on `hailo_model_zoo/cfg/networks/yolov9c.yaml` — note that config
-expects the 6-output WongKinYiu v9 layout, not the single-output ultralytics
-export) is the official fallback with full evaluation tooling.
+**The critical ordering: inject `nms_postprocess` at the `optimize` stage via
+`--model-script`, *not* at the `compiler` stage.** Adding the same script only
+to `hailo compiler` makes DFC 3.34 emit the post-process as a **separate
+external ONNX** (`<name>_postprocess.onnx`) inside the HAR — the HailoRT 5.x
+"on-the-fly post-process" mechanism — which HailoRT 4.21 ignores. The HEF then
+comes out with the raw head convs (6 output streams for a yolo-yolov9 head,
+`(40,40,64/80)`, `(20,20,64/80)`, `(10,10,64/80)` at 320 input) and no embedded
+NMS, so Frigate/`hailo8l.py` never sees scores. When NMS is applied at
+`optimize` instead, `nms_metadata` (engine `cpu`) survives into the quantized
+HAR and the final HEF matches the stock compiled-zoo output.
+
+Sanity-check a suspect HEF with HailoRT on the NVR before shipping:
+`create_infer_model(hef).outputs` must list **one** named
+`*_nms_postprocess` output (like stock's `[40080]`), not six conv tensors;
+`hailortcli parse-hef` should show an `Op YOLOV8` / `YOLOV8-Post-Process`
+operation. Grepping the raw bytes for `HAILO_NET_FLOW_YOLOV8_NMS` is a quick
+host-side proxy. Note `hailo parser` has **no** `--model-script` option — NMS
+can only be injected at optimize or compile.
 
 ## Calibration matters
 
@@ -116,10 +146,26 @@ the HEF's quantized accuracy is untrustworthy.
   `hailo runtime-profiler` should load and infer the 320×320 input.
 - On the host: `hailo profiler best_optimized.har` prints expected
   performance/accuracy estimates.
+- On the Frigate box (0.18 docker, this repo's case): confirm the HEF exposes
+  a single NMS output stream with HailoRT 4.21 before restarting anything:
+
+  ```python
+  from hailo_platform import VDevice
+  with VDevice() as v:
+      im = v.create_infer_model("/tmp/<name>.hef")
+      print([(o.name, o.shape) for o in im.outputs])  # want [('*', [40080])]
+  ```
+
+  then copy it into the config volume as `/config/model_cache/<name>.hef`
+  (frigate 0.18 loads detectors from `model_cache/`, not `/usr/share/frigate`),
+  and wire it under `model:` in Frigate's config:
+  `width/height` = `imgsz`, `input_tensor: nhwc`, `input_pixel_format: rgb`,
+  `input_dtype: int`, `model_type: yolo-generic`, `labelmap_path`, and
+  `path: /config/model_cache/<name>.hef`. Keep `detectors:` (`type: hailo8l_siglip`,
+  `device: PCIe`) untouched. Restart frigate and confirm `inference_speed` in
+  `/api/stats` is single-digit/teen ms and `detection_fps` > 0 on cameras.
 - Sanity-check the manifest: `hef_pending` should be `false`, `hw_arch`
-  `hailo8`, `hef_sha256` populated. Then copy the HEF to
-  `/usr/share/frigate/models/` on the NVR and paste `frigate-detector.yml`
-  under `detectors:` in Frigate's config.
+  `hailo8`, `hef_sha256` populated.
 
 ## Troubleshooting
 
@@ -132,6 +178,20 @@ the HEF's quantized accuracy is untrustworthy.
 - **Compile is slow on Apple Silicon:** the amd64 container runs under
   emulation; quantization is CPU-only inside it. Acceptable for a one-shot;
   for regular runs, use an x86-64 Linux box.
+- **HEF loads but detections are garbage / zero events:** a raw-tensor HEF with
+  no embedded NMS. Embedding happens only when `nms_postprocess` is applied at
+  the **optimize** stage (`--model-script nms.alls`, or `-y` auto-detection
+  carried through to optimize). Injecting it only to `hailo compiler` silently
+  produces a separate external postprocess ONNX that HailoRT 4.21 (Frigate's
+  pinned runtime) ignores — the HEF exposes six conv output streams instead of
+  one `*_nms_postprocess`. Confirm with `create_infer_model(hef).outputs`: you
+  want one `[40080]`-shaped output, not six `(40,40,64/80)`-style tensors.
+  DFC 3.34 emits net-flow metadata (`nms_metadata`, engine `cpu`) only when the
+  NMS is in the HAR before compile — the compiled HAR's stored alls should read
+  `nms_postprocess("{har}", meta_arch=yolov8)` and loading it via ClientRunner
+  must yield a non-`None` `nms_metadata`. Both this repo's working HEF and the
+  stock compiled-zoo `yolov8l_hailo8.hef` are proto version 5 / DFC 3.34 — the
+  discriminator is the embedded net-flow metadata, not the HEF version.
 - **HEF won't load in Frigate (HailoRT error):** HEF/RT version mismatch —
   stick to DFC 3.3x (this repo's default) or the exact DFC used to produce
   the compiled-zoo HEFs Frigate downloads.
