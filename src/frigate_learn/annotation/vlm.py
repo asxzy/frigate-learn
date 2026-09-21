@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import base64
 import io
+import json
 import logging
 import time
 from pathlib import Path
@@ -116,19 +117,26 @@ class OpenAICompatibleProvider:
                         ],
                     }
                 )
-                response = self._client.post(
-                    f"{self.base_url}/chat/completions",
-                    json={
-                        "model": self.model,
-                        "temperature": self.temperature,
-                        "messages": messages,
-                    },
-                )
-                if response.status_code in _RETRY_STATUS and attempt < attempts - 1:
-                    self._backoff(attempt)
-                    continue
-                response.raise_for_status()
-                data = response.json()
+                url = f"{self.base_url}/chat/completions"
+                payload = {
+                    "model": self.model,
+                    "temperature": self.temperature,
+                    "messages": messages,
+                }
+                deadline = time.monotonic() + self.timeout
+                with self._client.stream("POST", url, json=payload) as response:
+                    if response.status_code in _RETRY_STATUS and attempt < attempts - 1:
+                        self._backoff(attempt)
+                        continue
+                    response.raise_for_status()
+                    chunks: list[bytes] = []
+                    for chunk in response.iter_bytes():
+                        if time.monotonic() > deadline:
+                            raise VLMTransportError(
+                                f"VLM request exceeded {self.timeout:.0f}s deadline for {image}"
+                            )
+                        chunks.append(chunk)
+                data = json.loads(b"".join(chunks))
                 content = data["choices"][0]["message"]["content"]
                 parsed = extract_json_from_response(str(content))
                 return validate_vlm_output(parsed, allowed_labels=self.allowed_labels)
