@@ -35,6 +35,10 @@ web = [
     "uvicorn>=0.29",
 ]
 vlm = []
+audit = [
+    # SAM 3.1 teacher (MLX, Apple Silicon only; needs Python 3.13).
+    "sam3-mlx>=0.1.1",
+]
 ml = [
     "numpy>=1.26",
     "ultralytics>=8.2",   # heavy: pulls torch; only needed on the training machine

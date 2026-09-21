@@ -141,6 +141,60 @@ class HailoSettings:
     interactive: bool = False           # always pass `-y` to the DFC parser (auto-NMS)
 
 
+
+@dataclass
+class AuditSamSettings:
+    """SAM 3.1 (MLX) teacher settings for the audit pipeline."""
+
+    checkpoint: str = ""                # path to a converted sam3 checkpoint
+    load_from_hf: bool = True           # download/load weights from HF repo
+    hf_repo: str = "mlx-community/sam3-image"   # HF repo (quantized variants: sam3-8bit, sam3-4bit, ...)
+    quantize_bits: int = 0              # 0 = keep precision; 4/8 = in-memory mx.quantize
+    resolution: int = 1008              # SAM image resolution (multiple of 14)
+    confidence_threshold: float = 0.5   # filter SAM detections below this score
+    candidate_classes: list[str] = field(default_factory=list)
+
+
+@dataclass
+class AuditVlmSettings:
+    """VLM verifier (oMLX, OpenAI-compatible) settings."""
+
+    base_url: str = "http://127.0.0.1:8080/v1"
+    model: str = ""
+    api_key: str = ""
+    temperature: float = 0.0
+    timeout_seconds: float = 180.0
+    max_retries: int = 2
+    json_mode: bool = True
+
+
+@dataclass
+class AuditGeometrySettings:
+    """Deterministic geometry gates (opt-in; defaults record only)."""
+
+    min_mask_area: int = 0
+    min_bbox_iou: float = 0.0
+    mask_bbox_ratio_min: float = 0.0
+    mask_bbox_ratio_max: float = 9999.0
+    min_mask_frigate_containment: float = 0.0
+
+
+@dataclass
+class AuditSettings:
+    """Dataset audit and pseudo-labeling pipeline configuration."""
+
+    pipeline_version: int = 1
+    max_consecutive_vlm_errors: int = 5
+    input: str = "data"
+    output: str = "audit"
+    training: str = "training_audit"
+    sam: AuditSamSettings = field(default_factory=AuditSamSettings)
+    vlm: AuditVlmSettings = field(default_factory=AuditVlmSettings)
+    geometry: AuditGeometrySettings = field(default_factory=AuditGeometrySettings)
+    hard_negatives_enabled: bool = False
+    negative_sampling_enabled: bool = False
+    samples_per_crop: int = 0
+
 @dataclass
 class AutomationSettings:
     enable: list[str] = field(default_factory=lambda: ["collect", "build"])
@@ -173,6 +227,7 @@ class AppConfig:
     deployment: DeploymentSettings = field(default_factory=DeploymentSettings)
     hailo: HailoSettings = field(default_factory=HailoSettings)
     automation: AutomationSettings = field(default_factory=AutomationSettings)
+    audit: AuditSettings = field(default_factory=AuditSettings)
     data: DataSettings = field(default_factory=DataSettings)
     # absolute directory the config file lives in; anchors relative paths
     base_dir: Path = field(default_factory=Path.cwd)
@@ -319,6 +374,70 @@ def build_config(raw: dict[str, Any], base_dir: Path) -> AppConfig:
         _pop(col, "review_auto_useful", cfg.collection.review_auto_useful)
     )
 
+    au = _section(raw, "audit")
+    cfg.audit.pipeline_version = int(_pop(au, "pipeline_version", cfg.audit.pipeline_version))
+    cfg.audit.max_consecutive_vlm_errors = int(
+        _pop(au, "max_consecutive_vlm_errors", cfg.audit.max_consecutive_vlm_errors)
+    )
+    cfg.audit.input = str(_pop(au, "input", cfg.audit.input))
+    cfg.audit.output = str(_pop(au, "output", cfg.audit.output))
+    cfg.audit.training = str(_pop(au, "training", cfg.audit.training))
+    cfg.audit.hard_negatives_enabled = bool(
+        _pop(au, "hard_negatives_enabled", cfg.audit.hard_negatives_enabled)
+    )
+    cfg.audit.negative_sampling_enabled = bool(
+        _pop(au, "negative_sampling_enabled", cfg.audit.negative_sampling_enabled)
+    )
+    cfg.audit.samples_per_crop = int(
+        _pop(au, "samples_per_crop", cfg.audit.samples_per_crop)
+    )
+    au_models = _section(au, "models")
+    au_sam = _section(au_models, "sam")
+    cfg.audit.sam.checkpoint = str(_pop(au_sam, "checkpoint", cfg.audit.sam.checkpoint))
+    cfg.audit.sam.load_from_hf = bool(
+        _pop(au_sam, "load_from_hf", cfg.audit.sam.load_from_hf)
+    )
+    cfg.audit.sam.hf_repo = str(_pop(au_sam, "hf_repo", cfg.audit.sam.hf_repo))
+    cfg.audit.sam.quantize_bits = int(
+        _pop(au_sam, "quantize_bits", cfg.audit.sam.quantize_bits)
+    )
+    cfg.audit.sam.resolution = int(_pop(au_sam, "resolution", cfg.audit.sam.resolution))
+    cfg.audit.sam.confidence_threshold = float(
+        _pop(au_sam, "confidence_threshold", cfg.audit.sam.confidence_threshold)
+    )
+    cfg.audit.sam.candidate_classes = _as_str_list(
+        _pop(au_sam, "candidate_classes", cfg.audit.sam.candidate_classes)
+    )
+    au_models = _section(au, "models")
+    au_vlm = _section(au_models, "vlm")
+    cfg.audit.vlm.base_url = str(_pop(au_vlm, "base_url", cfg.audit.vlm.base_url))
+    cfg.audit.vlm.model = str(_pop(au_vlm, "model", cfg.audit.vlm.model))
+    cfg.audit.vlm.api_key = str(_pop(au_vlm, "api_key", cfg.audit.vlm.api_key))
+    cfg.audit.vlm.temperature = float(
+        _pop(au_vlm, "temperature", cfg.audit.vlm.temperature)
+    )
+    cfg.audit.vlm.timeout_seconds = float(
+        _pop(au_vlm, "timeout_seconds", cfg.audit.vlm.timeout_seconds)
+    )
+    cfg.audit.vlm.max_retries = int(_pop(au_vlm, "max_retries", cfg.audit.vlm.max_retries))
+    cfg.audit.vlm.json_mode = bool(_pop(au_vlm, "json_mode", cfg.audit.vlm.json_mode))
+    au_geom = _section(au, "geometry")
+    cfg.audit.geometry.min_mask_area = int(
+        _pop(au_geom, "min_mask_area", cfg.audit.geometry.min_mask_area)
+    )
+    cfg.audit.geometry.min_bbox_iou = float(
+        _pop(au_geom, "min_bbox_iou", cfg.audit.geometry.min_bbox_iou)
+    )
+    cfg.audit.geometry.mask_bbox_ratio_min = float(
+        _pop(au_geom, "mask_bbox_ratio_min", cfg.audit.geometry.mask_bbox_ratio_min)
+    )
+    cfg.audit.geometry.mask_bbox_ratio_max = float(
+        _pop(au_geom, "mask_bbox_ratio_max", cfg.audit.geometry.mask_bbox_ratio_max)
+    )
+    cfg.audit.geometry.min_mask_frigate_containment = float(
+        _pop(au_geom, "min_mask_frigate_containment",
+               cfg.audit.geometry.min_mask_frigate_containment)
+    )
     samp = _section(raw, "sampling")
     cfg.sampling.enabled = bool(_pop(samp, "enabled", cfg.sampling.enabled))
     cfg.sampling.max_samples_per_event = int(

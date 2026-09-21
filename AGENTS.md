@@ -17,10 +17,10 @@ control panel.
   deploy (ONNX → HEF), and the `frigate-learn run` orchestrator.
 - **Webapp (`frigate-learn web`):** FastAPI backend (`webapp/{app,api,queries,
   serving,jobs}.py`) + no-build vanilla-JS SPA (`webapp/static/`, vendored
-  uPlot). 16 endpoints under `/api/*`, six views (Overview, Benchmark, Quality,
-  Datasets, Training, Triage lightbox), pipeline stages run in a background
-  daemon thread (`jobs.py` JobManager, single job at a time, `jobs` SQLite
-  ledger, bounded log tail). Localhost-only, no auth/CORS.
+  uPlot). 22 endpoints under `/api/*`, seven views (Overview, Benchmark,
+  Quality, Audit, Datasets, Training, Triage lightbox), pipeline stages run
+  in a background daemon thread (`jobs.py` JobManager, single job at a time,
+  `jobs` SQLite ledger, bounded log tail). Localhost-only, no auth/CORS.
 
 ## Commands
 
@@ -30,7 +30,7 @@ control panel.
 .venv/bin/pip install -e ".[ml]"         # + torch/ultralytics (train/benchmark/verify)
 .venv/bin/frigate-learn --config config.yaml db init   # SQLite + migrations
 .venv/bin/frigate-learn web --host 127.0.0.1 --port 8080
-.venv/bin/python -m pytest               # full suite (340 tests)
+.venv/bin/python -m pytest               # full suite (444 tests)
 .venv/bin/python -m pytest -p no:warnings 2>&1 | tail -1   # pass count (warnings hide the summary line)
 .venv/bin/python -m pytest tests/test_webapp.py -v
 ```
@@ -43,7 +43,8 @@ control panel.
   `webapp/` or `static/`.
 - **CLI is click** (`cli.py`), subcommands: collect, inspect, triage, verify,
   discover, dataset, import-coco, benchmark, train, gate, deploy, run, status,
-  db, web.
+  db, web, audit (`audit-dataset` is an alias for `audit run`; dataset audit /
+  pseudo-labeling, see `audit/` and `docs/audit-pipeline.md`).
 - **SQLite via SQLAlchemy**, WAL mode; schema migrations run through
   `frigate-learn db init` (see `db.py`, `models.py`). Tests build fresh DBs in
   `tmp_path` and dispose sessions.

@@ -136,6 +136,43 @@ automation:
   till: "build"               # stop at this stage (inclusive)
   schedule: "0 3 * * *"       # cron shown in the systemd timer docs
 
+
+# --- Dataset audit & pseudo-labeling (frigate-learn audit run) -----------
+# SAM 3.1 (MLX, Apple Silicon) segments each existing Frigate crop; a VLM
+# (oMLX) independently verifies the object; sample is kept only when both
+# agree. Labels and classes always come from the Frigate vocabulary.
+audit:
+  pipeline_version: 1            # bump to invalidate all cached decisions
+  max_consecutive_vlm_errors: 5  # abort when the VLM server is down this many samples in a row
+  input: "data"                  # dataset root containing frigate.db + images/ or annotations/manifest.json
+  output: "audit"                # per-sample caches + decisions + provenance
+  training: "training_audit"     # exported positives/hard negatives + classes.txt
+  hard_negatives_enabled: false  # export VLM-confirmed false positives as hard negatives
+  negative_sampling_enabled: false
+  samples_per_crop: 0            # optional in-crop random background negatives
+  models:
+    sam:
+      checkpoint: ""             # path to converted SAM 3.1 weights ("" -> HF repo)
+      load_from_hf: true
+      resolution: 1008           # SAM image resolution, multiple of 14
+      confidence_threshold: 0.5  # minimum object-presence score to keep a candidate
+      candidate_classes: []      # extra classes SAM is asked about (Frigate class always asked)
+    vlm:
+      base_url: "http://127.0.0.1:8080/v1"   # oMLX OpenAI-compatible endpoint
+      model: ""                  # VLM model name loaded in oMLX
+      temperature: 0.0
+      timeout_seconds: 180.0
+      max_retries: 2
+      json_mode: true
+  geometry:
+    # Deterministic quality gates on the SAM result. All defaults are
+    # opt-in disabled: they only record metrics, never reject. Validate
+    # values on your data before enabling any gate.
+    min_mask_area: 0             # e.g. 48 px
+    min_bbox_iou: 0.0            # IoU(SAM bbox, Frigate bbox), e.g. 0.3
+    mask_bbox_ratio_min: 0.0     # mask area / SAM bbox area, e.g. 0.2
+    mask_bbox_ratio_max: 9999.0  # ... upper bound, e.g. 1.2
+    min_mask_frigate_containment: 0.0  # fraction of mask pixels inside Frigate bbox, e.g. 0.6
 # --- Paths ---------------------------------------------------------------
 # All paths are resolved relative to this file's directory.
 data:

@@ -21,6 +21,9 @@ golden/
 *.db-shm
 *.sqlite3
 data/previews/
+# audit pipeline runtime output (decisions, caches, training exports)
+/audit/
+/training_audit/
 # macOS / editor litter
 .DS_Store
 *.ses
@@ -31,3 +34,4 @@ data/previews/
 # model weights (large, reproducible) + ultralytics output
 *.pt
 runs/
+.hf-cache/
