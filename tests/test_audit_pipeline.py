@@ -370,3 +370,66 @@ def test_stats_scan_audit_dir(tmp_path):
     assert stats.accepted == 2
     assert stats.by_class["person"]["accepted"] == 2
 
+
+def _sample_export(crop, class_id, sample_id):
+    mask = np.zeros((64, 64), dtype=bool)
+    mask[10:50, 10:50] = True
+    sam = SamResult(
+        class_name="person",
+        bbox=BoundingBox(8.0, 8.0, 56.0, 56.0),
+        mask=Mask(mask),
+        confidence=0.9,
+    )
+    provenance = {"sample_id": sample_id, "decision": {"status": "KEEP"}}
+    return sam, provenance
+
+
+def test_export_groups_two_objects_in_one_frame(tmp_path):
+    from frigate_learn.audit.export import write_positive_sample
+
+    crop = Image.new("RGB", (64, 64), (20, 90, 160))
+    positive = tmp_path / "training" / "positive"
+    sam1, prov1 = _sample_export(crop, 0, "ann1")
+    sam2, prov2 = _sample_export(crop, 1, "ann2")
+    write_positive_sample(tmp_path / "training", "ann1", crop, 0, sam1, prov1, frame_key="s1")
+    write_positive_sample(tmp_path / "training", "ann2", crop, 1, sam2, prov2, frame_key="s1")
+
+    assert sorted(p.name for p in (positive / "images").glob("*.jpg")) == ["s1.jpg"]
+    lines = (positive / "labels" / "s1.txt").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2
+    assert lines[0].split()[0] == "0"
+    assert lines[1].split()[0] == "1"
+    assert sorted(p.name for p in (positive / "masks").glob("*.png")) == ["ann1.png", "ann2.png"]
+    rows = [json.loads(l) for l in (positive / "provenance.jsonl").read_text().splitlines()]
+    assert sorted(r["sample_id"] for r in rows) == ["ann1", "ann2"]
+
+
+def test_export_single_object_frame_matches_classic_shape(tmp_path):
+    from frigate_learn.audit.export import write_positive_sample
+
+    crop = Image.new("RGB", (64, 64), (20, 90, 160))
+    sam, prov = _sample_export(crop, 0, "s1")
+    write_positive_sample(tmp_path / "training", "s1", crop, 0, sam, prov)
+
+    positive = tmp_path / "training" / "positive"
+    assert sorted(p.name for p in (positive / "images").glob("*.jpg")) == ["s1.jpg"]
+    assert sorted(p.name for p in (positive / "masks").glob("*.png")) == ["s1.png"]
+    lines = (positive / "labels" / "s1.txt").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    assert len(lines[0].split()) == 5
+
+
+def test_export_repeat_is_idempotent_per_object(tmp_path):
+    from frigate_learn.audit.export import write_positive_sample
+
+    crop = Image.new("RGB", (64, 64), (20, 90, 160))
+    sam, prov = _sample_export(crop, 0, "ann1")
+    write_positive_sample(tmp_path / "training", "ann1", crop, 0, sam, prov)
+    write_positive_sample(tmp_path / "training", "ann1", crop, 0, sam, prov)
+
+    positive = tmp_path / "training" / "positive"
+    lines = (positive / "labels" / "ann1.txt").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    rows = [json.loads(l) for l in (positive / "provenance.jsonl").read_text().splitlines()]
+    assert len(rows) == 1
+

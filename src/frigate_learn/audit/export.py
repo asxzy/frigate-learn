@@ -2,15 +2,18 @@
 
 Positive samples are written as YOLO-style annotations:
 
-    <training>/positive/images/<sample_id>.jpg
-    <training>/positive/labels/<sample_id>.txt
-    <training>/positive/masks/<sample_id>.png
+    <training>/positive/images/<frame_key>.jpg
+    <training>/positive/labels/<frame_key>.txt
+    <training>/positive/masks/<object_id>.png
     <training>/positive/provenance.jsonl
     <training>/classes.txt
 
 The label uses the original Frigate class and the SAM-refined bbox; the mask
-is the SAM mask. Hard negatives (optional) land under
-``<training>/hard_negative/`` with empty label files.
+is the SAM mask. Exports group by physical frame: when several accepted
+objects share one frame, the image is written once and every object's YOLO
+line is appended to the shared ``.txt`` (the frame key defaults to the object
+id, so single-object frames keep the classic layout). Hard negatives
+(optional) land under ``<training>/hard_negative/`` with empty label files.
 """
 
 from __future__ import annotations
@@ -71,21 +74,52 @@ def write_positive_sample(
     class_id: int,
     sam_result: SamResult,
     provenance: dict[str, Any],
+    *,
+    frame_key: str | None = None,
 ) -> Path:
-    """Write one accepted sample; returns the labels path."""
+    """Write one accepted object; returns the labels path.
+
+    ``sample_id`` is the per-object identity (unique per object in a frame);
+    ``frame_key`` names the image/label files so one physical frame is written
+    once with every accepted object appended to its shared label file.
+    Per-object masks keep object-unique filenames. Re-exporting an already
+    recorded object is a no-op (idempotent label append + provenance).
+    """
     positive = training_root / "positive"
     (positive / "images").mkdir(parents=True, exist_ok=True)
     (positive / "labels").mkdir(parents=True, exist_ok=True)
     (positive / "masks").mkdir(parents=True, exist_ok=True)
-    crop.convert("RGB").save(positive / "images" / f"{sample_id}.jpg", quality=92)
+    key = frame_key or sample_id
+    crop.convert("RGB").save(positive / "images" / f"{key}.jpg", quality=92)
     width, height = crop.size
     line = yolo_label_line(class_id, sam_result.bbox, width, height)
-    _write_lines(positive / "labels" / f"{sample_id}.txt", [line])
+    label_path = positive / "labels" / f"{key}.txt"
+    provenance_path = positive / "provenance.jsonl"
+    if not _provenance_has_object(provenance_path, sample_id):
+        label_path.parent.mkdir(parents=True, exist_ok=True)
+        with label_path.open("a", encoding="utf-8") as fh:
+            fh.write(line + chr(10))
+        _append_jsonl(provenance_path, provenance)
     Image.fromarray(sam_result.mask.to_uint8(), mode="L").save(
         positive / "masks" / f"{sample_id}.png"
     )
-    _append_jsonl(positive / "provenance.jsonl", provenance)
-    return positive / "labels" / f"{sample_id}.txt"
+    return label_path
+
+
+def _provenance_has_object(path: Path, sample_id: str) -> bool:
+    if not path.is_file():
+        return False
+    with path.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if rec.get("sample_id") == sample_id:
+                return True
+    return False
 
 
 def write_hard_negative(

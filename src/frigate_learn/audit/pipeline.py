@@ -515,6 +515,7 @@ class AuditPipeline:
             return
         write_positive_sample(
             self.training_root, obj.sample_id, crop, class_id, sam_result, provenance,
+            frame_key=str(obj.extra.get("sample_id") or obj.sample_id),
         )
 
     def _is_hard_negative(self, decision: Decision) -> bool:
