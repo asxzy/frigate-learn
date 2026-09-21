@@ -6,9 +6,10 @@ PYTHON  ?= python3
 CONFIG  ?= config.yaml
 HOST    ?= 127.0.0.1
 PORT    ?= 8080
+SAM_PORT ?= 8001
 
 .PHONY: help setup venv install install-dev install-web install-ml \
-	install-all db-init db-migrate db-stats web test test-web lint \
+	install-all db-init db-migrate db-stats web sam-server test test-web lint \
 	fmt fmt-check run status clean
 
 help: ## Show this help
@@ -51,6 +52,9 @@ db-stats: ## Show database statistics
 
 web: ## Run the dashboard (HOST/PORT overridable)
 	$(FL) web --host $(HOST) --port $(PORT)
+
+sam-server: ## Run the remote SAM 3.1 endpoint (HOST/SAM_PORT overridable)
+	$(FL) sam-server --host $(HOST) --port $(SAM_PORT)
 
 test: ## Run the full test suite
 	$(PY) -m pytest -p no:warnings

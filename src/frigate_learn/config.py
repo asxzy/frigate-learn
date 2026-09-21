@@ -144,8 +144,17 @@ class HailoSettings:
 
 @dataclass
 class AuditSamSettings:
-    """SAM 3.1 (MLX) teacher settings for the audit pipeline."""
+    """SAM 3.1 teacher settings for the audit pipeline.
 
+    ``backend`` selects the teacher: ``mlx`` runs SAM 3.1 locally through
+    ``sam3_mlx`` (Apple Silicon); ``http`` calls a remote
+    ``frigate-learn sam-server`` endpoint with the settings below, so the
+    pipeline can run on a small VM that only performs HTTP calls. The
+    MLX-only fields (checkpoint/hf_repo/quantize_bits/resolution/
+    confidence_threshold/candidate_classes) are ignored in ``http`` mode.
+    """
+
+    backend: str = "mlx"                # "mlx" (local sam3_mlx) or "http" (remote endpoint)
     checkpoint: str = ""                # path to a converted sam3 checkpoint
     load_from_hf: bool = True           # download/load weights from HF repo
     hf_repo: str = "mlx-community/sam3-image"   # HF repo (quantized variants: sam3-8bit, sam3-4bit, ...)
@@ -153,6 +162,11 @@ class AuditSamSettings:
     resolution: int = 1008              # SAM image resolution (multiple of 14)
     confidence_threshold: float = 0.5   # filter SAM detections below this score
     candidate_classes: list[str] = field(default_factory=list)
+    base_url: str = ""                  # remote server root, e.g. http://192.168.1.50:8001
+    api_key: str = ""                   # optional shared secret sent as a Bearer token
+    model: str = ""                     # remote model label mixed into the cache key
+    timeout_seconds: float = 120.0      # hard wall-clock deadline per HTTP attempt
+    max_retries: int = 2                # extra attempts on transport/5xx failures
 
 
 @dataclass
@@ -408,6 +422,19 @@ def build_config(raw: dict[str, Any], base_dir: Path) -> AppConfig:
     cfg.audit.sam.candidate_classes = _as_str_list(
         _pop(au_sam, "candidate_classes", cfg.audit.sam.candidate_classes)
     )
+    cfg.audit.sam.backend = str(_pop(au_sam, "backend", cfg.audit.sam.backend))
+    cfg.audit.sam.base_url = str(_pop(au_sam, "base_url", cfg.audit.sam.base_url)).rstrip("/")
+    cfg.audit.sam.api_key = str(_pop(au_sam, "api_key", cfg.audit.sam.api_key))
+    cfg.audit.sam.model = str(_pop(au_sam, "model", cfg.audit.sam.model))
+    cfg.audit.sam.timeout_seconds = float(
+        _pop(au_sam, "timeout_seconds", cfg.audit.sam.timeout_seconds)
+    )
+    cfg.audit.sam.max_retries = int(_pop(au_sam, "max_retries", cfg.audit.sam.max_retries))
+    if cfg.audit.sam.backend not in ("mlx", "http"):
+        raise ValueError(
+            f"unknown audit.models.sam.backend {cfg.audit.sam.backend!r}; "
+            "expected 'mlx' (local sam3_mlx) or 'http' (remote sam-server)"
+        )
     au_models = _section(au, "models")
     au_vlm = _section(au_models, "vlm")
     cfg.audit.vlm.base_url = str(_pop(au_vlm, "base_url", cfg.audit.vlm.base_url))

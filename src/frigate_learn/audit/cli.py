@@ -181,7 +181,22 @@ def _build_adapter(input_path: Path):
 
 
 def _build_sam(audit) -> object:
-    """Build the SAM teacher from config."""
+    """Build the SAM teacher from config (local MLX or remote endpoint)."""
+    if audit.sam.backend == "http":
+        from .sam import HttpSamTeacher
+
+        if not audit.sam.base_url:
+            raise click.ClickException(
+                "audit.models.sam.backend=http requires audit.models.sam.base_url"
+                " (URL of a frigate-learn sam-server endpoint)"
+            )
+        return HttpSamTeacher(
+            base_url=audit.sam.base_url,
+            api_key=audit.sam.api_key,
+            model=audit.sam.model,
+            timeout_seconds=audit.sam.timeout_seconds,
+            max_retries=audit.sam.max_retries,
+        )
     from .sam import MlxSam3Teacher
 
     return MlxSam3Teacher(

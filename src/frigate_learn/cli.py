@@ -1020,6 +1020,30 @@ def web(host: str, port: int) -> None:
     uvicorn.run(create_app(), host=host, port=port)
 
 
+@cli.command(name="sam-server")
+@click.option("--host", default="127.0.0.1",
+              help="Bind address (default: 127.0.0.1; use 0.0.0.0 for remote clients).")
+@click.option("--port", type=int, default=8001, help="Port to listen on (default: 8001).")
+@click.pass_context
+def sam_server(ctx: click.Context, host: str, port: int) -> None:
+    """Serve the local SAM 3.1 (MLX) teacher as a remote HTTP endpoint.
+
+    Run this on the Apple Silicon host; point small VMs at it with
+    ``audit.models.sam.backend: http`` + ``base_url`` in their config, so the
+    pipeline there only performs HTTP calls (see docs/audit-pipeline.md).
+    """
+    import uvicorn
+
+    from .audit.server import create_sam_app
+
+    config = _load_config(ctx)
+    try:
+        app = create_sam_app(config)
+    except RuntimeError as exc:
+        raise click.ClickException(str(exc))
+    uvicorn.run(app, host=host, port=port)
+
+
 # --- audit ------------------------------------------------------------------
 
 

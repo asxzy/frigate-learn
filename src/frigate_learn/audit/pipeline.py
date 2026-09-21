@@ -379,6 +379,10 @@ class AuditPipeline:
         kind = vlm_block.get("error_kind") or "import"
         if kind == "run":
             return False
+        # Local backend: sam3_mlx importable? Remote backend: endpoint up?
+        available = getattr(self.sam_teacher, "is_available", None)
+        if callable(available):
+            return bool(available())
         return is_sam_available()
 
     def _ontology(self) -> list[str]:

@@ -206,6 +206,43 @@ def test_pipeline_resume_keeps_run_sam_failure_final(tmp_path, monkeypatch):
     assert stats2.cached_skipped == 1
     assert stats2.dropped == 1
 
+class AvailableSam(FakeSam):
+    """FakeSam with a controllable ``is_available`` probe (remote mode)."""
+
+    def __init__(self, available: bool = True, **kw):
+        super().__init__(**kw)
+        self._available = available
+
+    def is_available(self) -> bool:
+        return self._available
+
+
+def test_pipeline_resume_stale_sam_failure_respects_teacher_availability(tmp_path):
+    """Remote-mode staleness: import-kind sam_failure is refreshed only once
+    the teacher's own availability probe turns true."""
+    dataset = _make_dataset(tmp_path, n=1)
+    first = _pipeline(
+        dataset, sam=AvailableSam(outcomes={"person": "fail"}, fail_kind="import")
+    )
+    first.run()
+
+    down = _pipeline(
+        dataset,
+        sam=AvailableSam(outcomes={"person": "fail"}, fail_kind="import", available=False),
+    )
+    stats = down.run(options=PipelineOptions(resume=True))
+    assert len(down.sam_teacher.calls) == 0
+    assert stats.cached_skipped == 1
+    assert stats.dropped == 1
+
+    up = _pipeline(dataset, sam=AvailableSam(available=True))
+    stats = up.run(options=PipelineOptions(resume=True))
+    assert len(up.sam_teacher.calls) == 1
+    assert stats.cached_skipped == 0
+    assert stats.accepted == 1
+
+
+
 
 def test_pipeline_cache_avoids_recompute_on_plain_rerun(tmp_path):
     dataset = _make_dataset(tmp_path, n=1)

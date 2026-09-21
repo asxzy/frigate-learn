@@ -1,9 +1,15 @@
-"""SAM 3.1 teacher running through MLX on Apple Silicon.
+"""SAM 3.1 teacher: local MLX backend or a remote HTTP endpoint.
 
-The pipeline talks to :class:`SamTeacher` only; the concrete implementation
-(:class:`MlxSam3Teacher`) wraps the ``sam3_mlx`` package (Meta SAM 3 / 3.1
-ported to MLX). All sam3_mlx imports are lazy so the rest of the package
-imports and unit-tests cleanly on machines without the extra installed.
+The pipeline talks to :class:`SamTeacher` only and never picks an
+implementation. Two teachers exist:
+
+* :class:`MlxSam3Teacher` — SAM 3 / 3.1 ported to MLX (Apple Silicon)
+  through the ``sam3_mlx`` package. All sam3_mlx imports are lazy so the
+  rest of the package imports and unit-tests cleanly on machines without
+  the extra installed.
+* :class:`HttpSamTeacher` — calls a remote ``frigate-learn sam-server``
+  endpoint, so the pipeline can run on a small VM that only performs
+  HTTP calls (SAM 3.1 stays on the Apple Silicon host).
 
 Class handling
 ===============
@@ -34,9 +40,13 @@ Deterministic candidate-selection strategy (documented)
 
 from __future__ import annotations
 
+import base64
+import io
+import json
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+import httpx
 import numpy as np
 from PIL import Image
 
@@ -77,6 +87,10 @@ class SamTeacher(Protocol):
         frigate_class: str,
         frigate_bbox: BoundingBox,
     ) -> SamResult:
+        ...
+
+    def is_available(self) -> bool:
+        """True when the model backend is reachable (used for cache resync)."""
         ...
 
 
@@ -307,5 +321,249 @@ class MlxSam3Teacher:
         """Most recent mask array (debug aid; not part of the contract)."""
         return getattr(self, "_last_mask", None)
 
+    def is_available(self) -> bool:
+        """True when the ``sam3_mlx`` backend is importable on this machine."""
+        return is_sam_available()
 
-__all__ = ["MlxSam3Teacher", "SamTeacher", "SamTeacherError"]
+def _image_to_png_data_url(image: Image.Image) -> str:
+    """Encode a crop as a base64 PNG data URL for the remote endpoint."""
+    buf = io.BytesIO()
+    image.convert("RGB").save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    return f"data:image/png;base64,{b64}"
+
+
+def _safe_json(response: httpx.Response) -> Any:
+    """Parse a response body without raising on invalid JSON."""
+    try:
+        return response.json()
+    except json.JSONDecodeError:
+        return None
+
+
+def _error_message(body: Any) -> str | None:
+    """Best-effort human message from a fastapi-style error body."""
+    if not isinstance(body, dict):
+        return None
+    detail = body.get("detail")
+    if isinstance(detail, str) and detail:
+        return detail
+    if isinstance(detail, dict):
+        message = detail.get("message")
+        if isinstance(message, str) and message:
+            return message
+        return None
+    if isinstance(detail, list) and detail:
+        messages = []
+        for item in detail:
+            if isinstance(item, dict) and item.get("msg"):
+                messages.append(str(item["msg"]))
+        if messages:
+            return "; ".join(messages)
+    return None
+
+
+def _decode_mask_png(data: Any) -> np.ndarray:
+    """Decode the png-encoded binary mask from a remote SAM response."""
+    if not isinstance(data, dict) or data.get("encoding") != "png":
+        raise ValueError("mask must be an object with encoding=png")
+    b64 = data.get("base64")
+    if not isinstance(b64, str) or not b64:
+        raise ValueError("mask.base64 is missing")
+    try:
+        raw = base64.b64decode(b64)
+        arr = np.asarray(Image.open(io.BytesIO(raw)).convert("L")) > 127
+    except Exception as exc:
+        raise ValueError(f"mask decode failed: {exc}") from exc
+    if arr.ndim != 2 or not np.any(arr):
+        raise ValueError("mask must be a non-empty 2D boolean array")
+    return arr
+
+
+def parse_sam_response(payload: Any) -> SamResult:
+    """Strict parser for the remote SAM response schema.
+
+    Expects ``{class_name, bbox, confidence, mask: {encoding, base64},
+    model_key, raw_metadata}``. Raises :class:`SamTeacherError` with kind
+    ``run`` on any malformed or missing field; nothing is inferred.
+    """
+    if not isinstance(payload, dict):
+        raise SamTeacherError("SAM response must be a JSON object", kind="run")
+    class_name = payload.get("class_name")
+    if not isinstance(class_name, str) or not class_name:
+        raise SamTeacherError("SAM response is missing class_name", kind="run")
+    raw_bbox = payload.get("bbox")
+    if not isinstance(raw_bbox, (list, tuple)) or len(raw_bbox) != 4:
+        raise SamTeacherError("SAM response is missing bbox", kind="run")
+    try:
+        bbox = BoundingBox(*(float(v) for v in raw_bbox))
+    except (TypeError, ValueError) as exc:
+        raise SamTeacherError(f"SAM response bbox is invalid: {exc}", kind="run") from exc
+    if not bbox.is_valid():
+        raise SamTeacherError("SAM response bbox is degenerate", kind="run")
+    try:
+        mask = Mask(_decode_mask_png(payload.get("mask")))
+    except ValueError as exc:
+        raise SamTeacherError(f"SAM response mask is invalid: {exc}", kind="run") from exc
+    metadata = payload.get("raw_metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    server_key = payload.get("model_key")
+    if isinstance(server_key, str) and server_key:
+        metadata = {**metadata, "server_model_key": server_key}
+    confidence = payload.get("confidence")
+    if confidence is not None:
+        try:
+            confidence = float(confidence)
+        except (TypeError, ValueError) as exc:
+            raise SamTeacherError("SAM response confidence must be a number", kind="run") from exc
+    return SamResult(
+        class_name=class_name,
+        bbox=bbox,
+        mask=mask,
+        confidence=confidence,
+        raw_metadata=metadata,
+    )
+
+
+@dataclass
+class HttpSamSettings:
+    """Connection settings for a remote SAM endpoint."""
+
+    base_url: str = ""
+    api_key: str = ""
+    model: str = ""
+    timeout_seconds: float = 120.0
+    max_retries: int = 2
+
+
+class HttpSamTeacher:
+    """SAM teacher backed by a remote ``frigate-learn sam-server`` endpoint.
+
+    The audit pipeline only talks to :class:`SamTeacher`; this is the
+    *small-VM path*: SAM 3.1 (MLX) runs on the Apple Silicon host, and every
+    crop is POSTed as a PNG data URL to ``/predict``. The mask comes back
+    png-encoded, so geometry, reconciliation rendering and exports behave
+    exactly as with the local teacher.
+
+    ``model_key`` is derived from the endpoint URL and the configured
+    ``model`` label so caches invalidate when either changes — bump
+    ``audit.models.sam.model`` (or ``pipeline_version``) when the server's
+    weights change. Transport failures (unreachable/5xx/timeouts) map to
+    :class:`SamTeacherError` kind ``import`` and are re-attempted by
+    ``--resume`` once the endpoint is reachable again; deterministic
+    rejections (no candidate, malformed payload) map to kind ``run``.
+    """
+
+    settings: HttpSamSettings
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        api_key: str = "",
+        model: str = "",
+        timeout_seconds: float = 120.0,
+        max_retries: int = 2,
+    ) -> None:
+        self.settings = HttpSamSettings(
+            base_url=base_url.rstrip("/"),
+            api_key=api_key,
+            model=model,
+            timeout_seconds=float(timeout_seconds),
+            max_retries=int(max_retries),
+        )
+
+    @property
+    def model_key(self) -> str:
+        return f"sam3-http:{self.settings.base_url}:{self.settings.model or 'default'}"
+
+    def _headers(self) -> dict[str, str]:
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        if self.settings.api_key:
+            headers["Authorization"] = f"Bearer {self.settings.api_key}"
+        return headers
+
+    def _client(self) -> httpx.Client:
+        return httpx.Client(
+            base_url=self.settings.base_url,
+            headers=self._headers(),
+            timeout=httpx.Timeout(self.settings.timeout_seconds, connect=10.0),
+        )
+
+    def predict(
+        self,
+        image: Image.Image,
+        frigate_class: str,
+        frigate_bbox: BoundingBox,
+    ) -> SamResult:
+        """Run remote SAM on one crop; returns the best candidate result."""
+        payload: dict[str, Any] = {
+            "image": _image_to_png_data_url(image),
+            "frigate_class": frigate_class,
+            "bbox": frigate_bbox.to_list(),
+        }
+        last_error: Exception | None = None
+        for _attempt in range(1 + self.settings.max_retries):
+            try:
+                with self._client() as client:
+                    response = client.post("/predict", json=payload)
+            except httpx.HTTPError as exc:
+                last_error = exc
+                continue
+            if response.status_code == 200:
+                try:
+                    body = response.json()
+                except json.JSONDecodeError as exc:
+                    raise SamTeacherError(
+                        "SAM server returned a non-JSON response", kind="run"
+                    ) from exc
+                result = parse_sam_response(body)
+                if (
+                    result.mask.height != image.height
+                    or result.mask.width != image.width
+                ):
+                    raise SamTeacherError(
+                        f"SAM mask {result.mask.width}x{result.mask.height} does not match "
+                        f"crop {image.width}x{image.height}",
+                        kind="run",
+                    )
+                return result
+            if 400 <= response.status_code < 500:
+                message = _error_message(_safe_json(response))
+                raise SamTeacherError(
+                    message or f"SAM server rejected the request (HTTP {response.status_code})",
+                    kind="run",
+                )
+            last_error = SamTeacherError(
+                f"SAM server error (HTTP {response.status_code})", kind="import"
+            )
+        raise SamTeacherError(
+            f"SAM server unreachable after {1 + self.settings.max_retries} attempts: {last_error}",
+            kind="import",
+        )
+
+    def is_available(self) -> bool:
+        """True when the remote endpoint answers ``/healthz`` (short probe)."""
+        client = httpx.Client(
+            base_url=self.settings.base_url,
+            headers=self._headers(),
+            timeout=httpx.Timeout(5.0, connect=5.0),
+        )
+        try:
+            response = client.get("/healthz")
+            return response.status_code == 200
+        except httpx.HTTPError:
+            return False
+        finally:
+            client.close()
+
+
+__all__ = [
+    "HttpSamSettings",
+    "HttpSamTeacher",
+    "MlxSam3Teacher",
+    "SamTeacher",
+    "SamTeacherError",
+    "parse_sam_response",
+]

@@ -117,6 +117,12 @@ cp config.example.yaml config.yaml
 samples (dedup by Frigate `event_id`, with SHA-256 image hashing + optional
 dHash near-duplicate suppression).
 
+# dataset audit + pseudo-labeling (SAM 3.1 + blind VLM, see docs/audit-pipeline.md)
+# SAM is MLX-only (Apple Silicon); on a small VM isolate it as a remote endpoint:
+# on the SAM host:  .venv/bin/frigate-learn sam-server --host 0.0.0.0 --port 8001  (venv path; not on PATH)
+# on the VM:        audit.models.sam.backend: http + base_url (VLM already remote)
+.venv/bin/frigate-learn audit run --config config.yaml --resume
+
 ## Webapp
 
 A local dashboard (`frigate-learn web`) is the pipeline's control panel: it
@@ -299,6 +305,13 @@ src/frigate_learn/
 │   └── candidates.py      # P7: candidate table (name → weights)
 ├── deploy/
 │   └── hailo.py           # P12: ONNX export + HEF compile + Frigate detector YAML
+├── audit/                 # SAM 3.1 + blind-VLM reconciliation pipeline
+│   ├── pipeline.py        # per-sample orchestration + batch runner + resume
+│   ├── sam.py             # teachers: MlxSam3Teacher (local MLX) / HttpSamTeacher (remote)
+│   ├── server.py          # remote SAM FastAPI endpoint (`frigate-learn sam-server`)
+│   ├── vlm.py             # oMLX VLM reconciler (always remote, OpenAI-compatible)
+│   ├── decision.py        # conservative KEEP/DROP/PENDING rule
+│   └── cache.py           # per-sample caches keyed by the sample hash
 └── webapp/                # local control-panel dashboard (`frigate-learn web`)
     ├── app.py             # FastAPI app factory + static mount
     ├── api.py             # HTTP surface: 22 endpoints under /api/*

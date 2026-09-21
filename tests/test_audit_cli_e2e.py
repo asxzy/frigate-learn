@@ -11,6 +11,8 @@ exports and stats.
 
 from __future__ import annotations
 
+import base64
+import io
 import json
 import sqlite3
 import threading
@@ -122,6 +124,95 @@ def fake_vlm():
         thread.join(timeout=5)
 
 
+@dataclass
+class SamScenario:
+    """Health state for the fake remote SAM server (togglable mid-test)."""
+
+    healthy: bool = True
+
+
+def _make_sam_handler(scenario: SamScenario):
+    """HTTP fake of the `frigate-learn sam-server` endpoint.
+
+    Mirrors the local stub geometry: the SAM box is the Frigate box inset by
+    two pixels and the mask is that box filled. Supports a 503 "down" state
+    (healthz and predict) for the availability / resume-refresh tests.
+    """
+
+    class Handler(BaseHTTPRequestHandler):
+        def _json(self, code, payload):
+            data = json.dumps(payload).encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def do_GET(self):
+            if self.path.rstrip("/") == "/healthz":
+                code = 200 if scenario.healthy else 503
+                self._json(code, {"status": "ok" if scenario.healthy else "down"})
+            else:
+                self._json(404, {"detail": {"kind": "not_found"}})
+
+        def do_POST(self):
+            if self.path != "/predict":
+                self._json(404, {"detail": {"kind": "not_found"}})
+                return
+            if not scenario.healthy:
+                self._json(503, {"detail": "server down"})
+                return
+            length = int(self.headers.get("Content-Length", 0))
+            body = json.loads(self.rfile.read(length))
+            data_url = body["image"]
+            b64 = data_url.split(",", 1)[1]
+            img = Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGB")
+            width, height = img.size
+            bbox = [float(v) for v in body["bbox"]]
+            x1 = int(bbox[0]) + 2
+            y1 = int(bbox[1]) + 2
+            x2 = min(width, int(bbox[2]) - 2)
+            y2 = min(height, int(bbox[3]) - 2)
+            if x2 <= x1 or y2 <= y1:
+                x1, y1 = int(bbox[0]), int(bbox[1])
+                x2, y2 = min(width, int(bbox[2])), min(height, int(bbox[3]))
+            mask = np.zeros((height, width), dtype=bool)
+            mask[y1:y2, x1:x2] = True
+            buf = io.BytesIO()
+            Image.fromarray(mask.astype(np.uint8) * 255, "L").save(buf, format="PNG")
+            payload = {
+                "class_name": body["frigate_class"],
+                "bbox": [float(x1), float(y1), float(x2), float(y2)],
+                "confidence": 0.95,
+                "mask": {
+                    "encoding": "png",
+                    "base64": base64.b64encode(buf.getvalue()).decode("ascii"),
+                },
+                "model_key": "stub-sam:http:1",
+                "raw_metadata": {"server": "fake"},
+            }
+            self._json(200, payload)
+
+        def log_message(self, format, *args):
+            pass
+
+    return Handler
+
+
+@pytest.fixture()
+def fake_sam():
+    """Start a real local SAM (frigate-learn sam-server) HTTP fake."""
+    scenario = SamScenario()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _make_sam_handler(scenario))
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base_url = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        yield scenario, base_url
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
 def _make_image(rows: int, cols: int, color: tuple = (180, 190, 200)) -> Image.Image:
     img = Image.new("RGB", (cols, rows), (24, 28, 34))
     draw = ImageDraw.Draw(img)
@@ -196,6 +287,7 @@ def _write_config(
     training: str,
     vlm_base: str,
     extra: str = "",
+    sam_extra: str = "",
 ) -> None:
     lines = [
         "classes: [person, car, bird]",
@@ -204,6 +296,12 @@ def _write_config(
     lines.append(f'  input: "{input_dir}"')
     lines.append(f'  output: "{output}"')
     lines.append(f'  training: "{training}"')
+    sam_lines = [
+        "      load_from_hf: false",
+        "      confidence_threshold: 0.4",
+    ]
+    if sam_extra:
+        sam_lines.append(sam_extra)
     lines += [
         "  pipeline_version: 7",
         "  max_consecutive_vlm_errors: 3",
@@ -212,8 +310,7 @@ def _write_config(
         "  samples_per_crop: 1",
         "  models:",
         "    sam:",
-        "      load_from_hf: false",
-        "      confidence_threshold: 0.4",
+        *sam_lines,
         "    vlm:",
     ]
     lines.append(f'      base_url: "{vlm_base}"')
@@ -519,4 +616,141 @@ def test_overrides_are_honored(tmp_path, fake_vlm, monkeypatch):
     assert not (training / "positive" / "images" / "a1.jpg").exists()
 
 
-__all__ = ["StubSamTeacher", "VlmScenario", "_make_handler", "_write_config", "fake_vlm"]
+def test_remote_sam_end_to_end(tmp_path, fake_vlm, fake_sam):
+    """The small-VM path: SAM comes from a remote HTTP endpoint, never a
+    local sam3_mlx import (no monkeypatch needed)."""
+    scenario, vlm_base = fake_vlm
+    scenario.class_seq = ["person", "car"]
+    sam_scenario, sam_base = fake_sam
+    dataset = _make_manifest_dataset(tmp_path / "dataset", [
+        {"id": "p1", "label": "person", "rows": 96, "cols": 128, "box": [0.30, 0.30, 0.55, 0.75]},
+        {"id": "c1", "label": "car", "rows": 64, "cols": 96, "box": [0.20, 0.40, 0.70, 0.60]},
+    ])
+    cfg = tmp_path / "config.yaml"
+    _write_config(
+        cfg,
+        input_dir=str(dataset),
+        output="out/audit",
+        training="out/training",
+        vlm_base=vlm_base,
+        sam_extra=f'      backend: "http"\n      base_url: "{sam_base}"\n      model: "stub-remote"',
+    )
+
+    result = _invoke(["run", "--config", str(cfg), "--stats-json"])
+    assert result.exit_code == 0, result.output
+    stats = _run_stats_json(result.output)
+    assert stats["total"] == 2 and stats["processed"] == 2
+    assert stats["sam_ok"] == 2 and stats["sam_fail"] == 0
+    assert stats["vlm_calls"] == 2
+    assert stats["accepted"] == 2
+    assert sam_scenario.healthy
+    audit_out = tmp_path / "out" / "audit"
+    for sid in ("p1", "c1"):
+        assert (audit_out / sid / "sam.json").is_file()
+        assert (audit_out / sid / "mask.png").is_file()
+        decision = json.loads((audit_out / sid / "decision.json").read_text())
+        assert decision["decision"]["status"] == "KEEP"
+    assert (tmp_path / "out" / "training" / "positive" / "masks" / "p1.png").is_file()
+
+
+def test_remote_sam_resume_skips_cached_with_server_down(tmp_path, fake_vlm, fake_sam):
+    """--resume must stay offline-capable: the SAM cache key is derived from
+    config, not from probing the server."""
+    scenario, vlm_base = fake_vlm
+    scenario.class_seq = ["person"]
+    sam_scenario, sam_base = fake_sam
+    dataset = _make_manifest_dataset(tmp_path / "dataset", [
+        {"id": "p1", "label": "person", "rows": 96, "cols": 128, "box": [0.30, 0.30, 0.55, 0.75]},
+    ])
+    cfg = tmp_path / "config.yaml"
+    _write_config(
+        cfg,
+        input_dir=str(dataset),
+        output="out/audit",
+        training="out/training",
+        vlm_base=vlm_base,
+        sam_extra=f'      backend: "http"\n      base_url: "{sam_base}"\n      model: "stub-remote"',
+    )
+    first = _invoke(["run", "--config", str(cfg), "--stats-json"])
+    assert first.exit_code == 0, first.output
+    assert _run_stats_json(first.output)["sam_ok"] == 1
+
+    sam_scenario.healthy = False
+    second = _invoke(["run", "--config", str(cfg), "--resume", "--stats-json"])
+    assert second.exit_code == 0, second.output
+    rstats = _run_stats_json(second.output)
+    assert rstats["total"] == 1
+    assert rstats["cached_skipped"] == 1
+    assert rstats["processed"] == 0
+    assert rstats["accepted"] == 1
+
+
+def test_remote_sam_failure_refreshes_once_server_returns(tmp_path, fake_vlm, fake_sam):
+    """Transport failures are environmental (kind=import): a cached
+    sam_failure DROP is refreshed by --resume once the endpoint is reachable
+    again (is_available() probe on /healthz)."""
+    scenario, vlm_base = fake_vlm
+    scenario.class_seq = ["person", "car"]
+    sam_scenario, sam_base = fake_sam
+    dataset = _make_manifest_dataset(tmp_path / "dataset", [
+        {"id": "p1", "label": "person", "rows": 96, "cols": 128, "box": [0.30, 0.30, 0.55, 0.75]},
+        {"id": "c1", "label": "car", "rows": 64, "cols": 96, "box": [0.20, 0.40, 0.70, 0.60]},
+    ])
+    cfg = tmp_path / "config.yaml"
+    sam_lines = (
+        f'      backend: "http"\n'
+        f'      base_url: "{sam_base}"\n'
+        f'      model: "stub-remote"\n'
+        f'      max_retries: 0\n'
+        f'      timeout_seconds: 5'
+    )
+    _write_config(
+        cfg,
+        input_dir=str(dataset),
+        output="out/audit",
+        training="out/training",
+        vlm_base=vlm_base,
+        sam_extra=sam_lines,
+    )
+
+    sam_scenario.healthy = False
+    first = _invoke(["run", "--config", str(cfg), "--stats-json"])
+    assert first.exit_code == 0, first.output
+    stats = _run_stats_json(first.output)
+    assert stats["total"] == 2 and stats["processed"] == 2
+    assert stats["sam_fail"] == 2 and stats["accepted"] == 0
+    decision = json.loads((tmp_path / "out" / "audit" / "p1" / "decision.json").read_text())
+    assert decision["decision"]["status"] == "DROP"
+    assert decision["decision"]["reason"] == "sam_failure"
+    assert decision["provenance"]["vlm"]["error_kind"] == "import"
+
+    sam_scenario.healthy = True
+    second = _invoke(["run", "--config", str(cfg), "--resume", "--stats-json"])
+    assert second.exit_code == 0, second.output
+    rstats = _run_stats_json(second.output)
+    assert rstats["cached_skipped"] == 0
+    assert rstats["processed"] == 2
+    assert rstats["sam_ok"] == 2 and rstats["sam_fail"] == 0
+    assert rstats["accepted"] == 2
+
+
+def test_remote_sam_http_backend_requires_base_url(tmp_path, fake_vlm):
+    _, vlm_base = fake_vlm
+    dataset = _make_manifest_dataset(tmp_path / "dataset", [
+        {"id": "p1", "label": "person", "rows": 96, "cols": 128, "box": [0.30, 0.30, 0.55, 0.75]},
+    ])
+    cfg = tmp_path / "config.yaml"
+    _write_config(
+        cfg,
+        input_dir=str(dataset),
+        output="out/audit",
+        training="out/training",
+        vlm_base=vlm_base,
+        sam_extra='      backend: "http"',
+    )
+    result = _invoke(["run", "--config", str(cfg)])
+    assert result.exit_code != 0
+    assert "base_url" in result.output
+
+
+__all__ = ["SamScenario", "StubSamTeacher", "VlmScenario", "_make_handler", "_make_sam_handler", "_write_config", "fake_sam", "fake_vlm"]

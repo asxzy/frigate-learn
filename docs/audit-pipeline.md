@@ -19,6 +19,7 @@ can only confirm or reject them.
 .venv/bin/frigate-learn audit run --config config.yaml --resume
 .venv/bin/frigate-learn audit stats audit/
 .venv/bin/frigate-learn audit-dataset run --config config.yaml   # alias for audit run
+.venv/bin/frigate-learn sam-server --host 0.0.0.0 --port 8001  # remote SAM endpoint (Apple Silicon host)
 ```
 
 `run` options: `--input`, `--output`, `--training-output`, `--resume`,
@@ -58,6 +59,7 @@ audit:
   samples_per_crop: 0            # optional in-crop background negatives
   models:
     sam:
+      backend: "mlx"            # "mlx" (local sam3_mlx) or "http" (remote sam-server)
       checkpoint: ""             # "" -> weights from the HF repo
       load_from_hf: true
       hf_repo: "mlx-community/sam3-image"   # native sam3_mlx format; transformers-format quantized repos (sam3-8bit/4bit) are rejected
@@ -65,6 +67,12 @@ audit:
       resolution: 1008
       confidence_threshold: 0.5
       candidate_classes: []      # extra candidates; Frigate class always asked
+      # --- remote mode (backend: "http") ---
+      # base_url: "http://192.168.1.50:8001"   # frigate-learn sam-server endpoint
+      # api_key: "${SAM_SERVER_KEY}"           # optional Bearer token the server checks
+      # model: "sam3-1"                        # cache-key label; bump when server weights change
+      # timeout_seconds: 120.0                 # hard wall-clock deadline per attempt
+      # max_retries: 2                         # extra attempts on transport/5xx failures
     vlm:
       base_url: "http://127.0.0.1:8080/v1"   # oMLX OpenAI-compatible endpoint
       model: ""
@@ -112,7 +120,7 @@ and optional random backgrounds land in `<training>/hard_negative/`.
 Every artifact is keyed by a stable sample hash (image content + class +
 bbox + SAM key + VLM key + pipeline version). The SAM key is derived from the
 model config (weight source, resolution, confidence threshold, candidate
-classes) and the VLM key from the endpoint base URL, model, temperature and
+classes; in remote mode: `sam3-http:<base_url>:<model>`) and the VLM key from the endpoint base URL, model, temperature and
 json mode — so changing any of those invalidates the matching caches and
 `--resume` re-decides affected samples. A rerun reuses SAM, reconciliation and
 VLM caches; `--resume` skips samples with a valid final KEEP/DROP decision and
@@ -126,12 +134,67 @@ re-attempt those samples; model-driven failures (`error_kind == "run"`) stay
 final because they are deterministic for the given weights. SAM candidate
 selection is deterministic (Frigate-class tie-break, documented in `sam.py`).
 
+## Remote SAM (small VM)
+
+SAM 3.1 is the only Apple-Silicon-only component of the pipeline (MLX +
+`sam3_mlx`). If the pipeline itself should run on a small VM that has no
+SAM weights and no MLX stack, isolate SAM behind an endpoint exactly like
+the VLM already is:
+
+1. **On the Apple Silicon host** (the machine with `pip install -e ".[audit,web]"`):
+
+   ```bash
+   # the command only exists inside the project venv — use the full path,
+   # `source .venv/bin/activate` first, or `make sam-server` from the repo root
+   .venv/bin/frigate-learn sam-server --host 0.0.0.0 --port 8001
+   ```
+
+   It loads the local teacher from `audit.models.sam` (backend `mlx`) and
+   serves:
+
+   * `GET /healthz` — liveness probe used by the client's `is_available()`
+     and by `--resume` to refresh stale `sam_failure` decisions
+   * `POST /predict` — `{image: <png data url>, frigate_class, bbox}` →
+     `{class_name, bbox, confidence, mask: {encoding: png, base64},
+     model_key, raw_metadata}`
+
+   Model weights load lazily on the first request; predictions are
+   serialised (the MLX processor is not thread-safe). Keep the endpoint on
+   a trusted network or set `audit.models.sam.api_key` — the server does
+   not check auth on its own.
+
+2. **On the small VM** set `audit.models.sam` to:
+
+   ```yaml
+   audit:
+     models:
+       sam:
+         backend: "http"
+         base_url: "http://192.168.1.50:8001"
+         model: "sam3-1"        # cache-key label; bump when server weights change
+         api_key: "${SAM_SERVER_KEY}"
+         timeout_seconds: 120
+         max_retries: 2
+   ```
+
+   The VM then needs no `sam3_mlx`/`mlx` at all — every crop is sent as a
+   base64 PNG and the mask comes back png-encoded, so geometry, caches,
+   reconciliation rendering and exports are byte-identical to the local
+   path. `--resume` skips finished samples even while the SAM endpoint is
+   down (the cache key is derived from config, not from probing), and a
+   cached `sam_failure` recorded while the endpoint was unreachable
+   (`error_kind: import`) is refreshed on the next `--resume` once
+   `/healthz` answers again.
+
 ## Degradation without extras/server
 
 With `sam3_mlx`/`mlx` absent the `MlxSam3Teacher` raises a clear
 `SamTeacherError`, every sample is dropped with reason `sam_failure`, and
 the run still writes decisions/provenance and exits 0 — the CLI never
-crashes on a bare `pip install -e .[dev]`.
+crashes on a bare `pip install -e .[dev]`. The same holds when a remote
+`sam-server` endpoint is unreachable (`sam3-http` teacher) — those
+`sam_failure` decisions are re-attempted on the next `--resume` once the
+endpoint answers `/healthz` again.
 
 ## End-to-end tests (no deployment)
 

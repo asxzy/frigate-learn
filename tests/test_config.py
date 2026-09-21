@@ -198,3 +198,46 @@ def test_trainable_class_mask_subset_is_none():
 def test_coco80_rejects_non_coco_class():
     with pytest.raises(ValueError, match="deer"):
         build_config({"classes": ["person", "deer"]}, base_dir=Path("/tmp/x"))
+
+def test_audit_sam_remote_defaults():
+    cfg = AppConfig()
+    assert cfg.audit.sam.backend == "mlx"
+    assert cfg.audit.sam.base_url == ""
+    assert cfg.audit.sam.api_key == ""
+    assert cfg.audit.sam.model == ""
+    assert cfg.audit.sam.timeout_seconds == 120.0
+    assert cfg.audit.sam.max_retries == 2
+
+
+def test_build_config_maps_remote_sam_settings():
+    raw = {
+        "classes": ["person"],
+        "audit": {
+            "models": {
+                "sam": {
+                    "backend": "http",
+                    "base_url": "http://sam-host:8001/",
+                    "api_key": "sekrit",
+                    "model": "sam3-1",
+                    "timeout_seconds": 90,
+                    "max_retries": 4,
+                }
+            }
+        },
+    }
+    cfg = build_config(raw, base_dir=Path("/tmp/x"))
+    assert cfg.audit.sam.backend == "http"
+    assert cfg.audit.sam.base_url == "http://sam-host:8001"  # trailing slash stripped
+    assert cfg.audit.sam.api_key == "sekrit"
+    assert cfg.audit.sam.model == "sam3-1"
+    assert cfg.audit.sam.timeout_seconds == 90.0
+    assert cfg.audit.sam.max_retries == 4
+
+
+def test_build_config_rejects_unknown_sam_backend():
+    with pytest.raises(ValueError, match="backend"):
+        build_config(
+            {"audit": {"models": {"sam": {"backend": "tpu"}}}},
+            base_dir=Path("/tmp/x"),
+        )
+

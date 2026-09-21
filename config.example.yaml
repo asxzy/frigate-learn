@@ -152,11 +152,24 @@ audit:
   samples_per_crop: 0            # optional in-crop random background negatives
   models:
     sam:
+      # backend: "mlx" (default) runs SAM 3.1 on this machine (Apple Silicon +
+      # sam3_mlx, the `audit` extra). "http" calls a remote
+      # `frigate-learn sam-server` endpoint (see the remote-mode keys below)
+      # so the pipeline can run on a small VM that only performs HTTP calls.
+      backend: "mlx"
       checkpoint: ""             # path to converted SAM 3.1 weights ("" -> HF repo)
       load_from_hf: true
+      hf_repo: "mlx-community/sam3-image"   # native sam3_mlx format; quantized HF repos (sam3-8bit/4bit) are transformers-format and incompatible
+      quantize_bits: 0           # 0 = keep precision; 4/8 = in-memory mx.quantize (breaks sam3_mlx decoder heads upstream)
       resolution: 1008           # SAM image resolution, multiple of 14
       confidence_threshold: 0.5  # minimum object-presence score to keep a candidate
       candidate_classes: []      # extra classes SAM is asked about (Frigate class always asked)
+      # --- remote mode (backend: "http") -------------------------------
+      # base_url: "http://192.168.1.50:8001"   # frigate-learn sam-server endpoint
+      # api_key: "${SAM_SERVER_KEY}"           # optional Bearer token the server checks
+      # model: "sam3-1"                        # cache-key label; bump when server weights change
+      # timeout_seconds: 120.0                 # hard wall-clock deadline per attempt
+      # max_retries: 2                         # extra attempts on transport/5xx failures
     vlm:
       base_url: "http://127.0.0.1:8080/v1"   # oMLX OpenAI-compatible endpoint
       model: ""                  # VLM model name loaded in oMLX
