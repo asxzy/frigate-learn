@@ -33,13 +33,50 @@ def test_migrations_idempotent(db):
 
 def test_applied_and_pending(db):
     applied = db.applied_migrations()
-    assert len(applied) == 3
+    assert len(applied) == 4
     assert applied == [
         "0001_initial.sql",
         "0002_multiframe_phash.sql",
         "0003_review_sync.sql",
+        "0004_multi_object.sql",
     ]
-    assert db.schema_version() == 3
+    assert db.schema_version() == 4
+
+
+def test_0004_adds_annotation_event_id(db):
+    from sqlalchemy import text
+
+    with db.engine.connect() as conn:
+        cols = {
+            row[1]
+            for row in conn.execute(text("PRAGMA table_info(annotations)"))
+        }
+    assert "event_id" in cols
+
+
+def test_0004_rejects_duplicate_sample_event(db):
+    from sqlalchemy.exc import IntegrityError
+
+    from frigate_learn.models import Annotation, Sample, utcnow
+
+    with db.session() as s:
+        s.add(Sample(id="a", camera="front", timestamp=1.0, event_id="evt1",
+                     source="frigate", status="collected", created_at=utcnow()))
+        s.commit()
+        s.add(Annotation(id="a1", sample_id="a", source="frigate", label="person",
+                         event_id="evt1", verified=0, created_at=utcnow()))
+        s.commit()
+        s.add(Annotation(id="a2", sample_id="a", source="frigate", label="car",
+                         event_id="evt1", verified=0, created_at=utcnow()))
+        with pytest.raises(IntegrityError):
+            s.commit()
+
+    with db.session() as s:
+        s.add(Annotation(id="a3", sample_id="a", source="vlm", label="person",
+                         event_id=None, verified=1, created_at=utcnow()))
+        s.add(Annotation(id="a4", sample_id="a", source="vlm", label="car",
+                         event_id=None, verified=1, created_at=utcnow()))
+        s.commit()
 
 
 def test_0003_adds_review_sync_columns(db):

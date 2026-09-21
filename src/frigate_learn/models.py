@@ -55,6 +55,7 @@ class Annotation(Base):
     sample_id: Mapped[str] = mapped_column(
         ForeignKey("samples.id"), nullable=False, index=True
     )
+    event_id: Mapped[str | None] = mapped_column(Text, nullable=True, index=True)
     source: Mapped[str] = mapped_column(Text, nullable=False)
     label: Mapped[str] = mapped_column(Text, nullable=False)
     x1: Mapped[float | None] = mapped_column(Float, nullable=True)
