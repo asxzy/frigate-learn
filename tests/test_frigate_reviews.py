@@ -22,7 +22,6 @@ def test_parse_review_iso_and_float_timestamps():
         "end_time": 1786723200.0,
         "severity": "detection",
         "thumb_path": "/api/media/front/thumb.jpg",
-        "has_been_reviewed": False,
         "zones": ["home"],
         "data": {"detections": ["e1", "e2"], "objects": ["person"]},
     }
@@ -30,7 +29,6 @@ def test_parse_review_iso_and_float_timestamps():
     assert review.id == "r1"
     assert review.camera == "front"
     assert review.severity == "detection"
-    assert review.has_been_reviewed is False
     assert review.zones == ["home"]
     assert review.end_time == pytest.approx(1786723200.0)
     assert review.start_time == pytest.approx(ISO_TS)

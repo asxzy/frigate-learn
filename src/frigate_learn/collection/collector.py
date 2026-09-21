@@ -1,8 +1,7 @@
-"""Frigate review/event batch collector (Phase 1).
+"""Frigate segment/event batch collector (Phase 1).
 
-Owns its pipeline state: it never consults Frigate's ``has_been_reviewed``
-flag, and dedup is driven by our own SQLite ``samples.event_id`` unique key +
-SHA-256 image hashing.
+Owns its pipeline state: dedup is driven by our own SQLite
+``samples.event_id`` unique key + SHA-256 image hashing.
 
 Flow:
 
@@ -100,6 +99,7 @@ class Collector:
         progress: ProgressFn | None = None,
         refresh: bool = False,
         job_id: str | None = None,
+        record_job: bool = True,
     ) -> CollectSummary:
         started = datetime.now(timezone.utc)
         summary = CollectSummary(
@@ -112,7 +112,8 @@ class Collector:
         job_id = job_id or str(uuid.uuid4())
         summary.job_id = job_id
         self.db.migrate()
-        self._record_job(job_id, type="collect", status="running", started_at=utcnow())
+        if record_job:
+            self._record_job(job_id, type="collect", status="running", started_at=utcnow())
 
         workers = concurrency or self.config.collection.concurrency
         try:
@@ -122,19 +123,14 @@ class Collector:
             summary.reviews_found = len(reviews)
             (progress or _noop)(f"Reviews found: {len(reviews)}")
 
-            reviewed_by_id = {
-                r.id: r.has_been_reviewed for r in reviews if r.has_been_reviewed is not None
-            }
+            event_ids = self._resolve_events(reviews, summary)
+            (progress or _noop)(f"Events found: {len(event_ids)}")
 
-            event_to_review = self._resolve_events(reviews, summary)
-            (progress or _noop)(f"Events found: {len(event_to_review)}")
-
-            new_events = self._prune_existing(event_to_review, summary, refresh=refresh)
+            new_events = self._prune_existing(event_ids, summary, refresh=refresh)
             (progress or _noop)(f"New events to collect: {len(new_events)}")
 
             self._download_and_store(
                 new_events, summary, workers=workers, progress=progress,
-                reviewed_by_id=reviewed_by_id,
             )
 
             summary.duration_seconds = (
@@ -179,18 +175,21 @@ class Collector:
         info("collected review list", count=len(reviews))
         return reviews
 
-    def _resolve_events(self, reviews: Sequence, summary: CollectSummary) -> dict[str, str]:
-        """Map event_id -> first review_id that referenced it."""
-        mapping: dict[str, str] = {}
+    def _resolve_events(self, reviews: Sequence, summary: CollectSummary) -> list[str]:
+        """Unique event ids referenced across the fetched segments (stable order)."""
+        mapping: list[str] = []
+        seen: set[str] = set()
         for review in reviews:
             for event_id in extract_event_ids(review):
-                mapping.setdefault(event_id, review.id)
+                if event_id not in seen:
+                    seen.add(event_id)
+                    mapping.append(event_id)
         summary.events_found = len(mapping)
         return mapping
 
     def _prune_existing(
-        self, event_to_review: dict[str, str], summary: CollectSummary, refresh: bool = False
-    ) -> list[tuple[str, str]]:
+        self, event_ids: list[str], summary: CollectSummary, refresh: bool = False
+    ) -> list[str]:
         """Remove events already stored as samples (idempotency).
 
         With ``refresh=True``, already-stored events are *not* pruned: their
@@ -198,7 +197,6 @@ class Collector:
         re-collected under the current collection settings (e.g. upgrading a
         crop-era pool to full-frame snapshots).
         """
-        event_ids = list(event_to_review.keys())
         existing: set[str] = set()
         with self.db.session() as session:
             for event_id in event_ids:
@@ -221,11 +219,9 @@ class Collector:
             info("refresh: dropped prior collection", events=len(existing), samples=deleted)
         if refresh:
             # re-collect the previously-stored events too (they were deleted above)
-            new_events = list(event_to_review.items())
+            new_events = list(event_ids)
         else:
-            new_events = [
-                (eid, event_to_review[eid]) for eid in event_ids if eid not in existing
-            ]
+            new_events = [eid for eid in event_ids if eid not in existing]
         max_events = self.config.collection.max_events
         if max_events and len(new_events) > max_events:
             new_events = new_events[:max_events]
@@ -268,28 +264,26 @@ class Collector:
 
     def _download_and_store(
         self,
-        events: list[tuple[str, str]],
+        events: list[str],
         summary: CollectSummary,
         workers: int,
         progress: ProgressFn | None,
-        reviewed_by_id: dict[str, bool | None] | None = None,
     ) -> None:
         done = 0
-        reviewed_by_id = reviewed_by_id or {}
         with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
             futures = {
                 pool.submit(
-                    self._process_event, event_id, review_id, reviewed_by_id
-                ): (event_id, review_id)
-                for event_id, review_id in events
+                    self._process_event, event_id
+                ): event_id
+                for event_id in events
             }
             for future in as_completed(futures):
-                event_id, review_id = futures[future]
+                event_id = futures[future]
                 try:
                     outcome = future.result()
                 except Exception as exc:  # worker-level safety net
                     error("event processing raised", event_id=event_id, error=str(exc))
-                    self._record_failure(event_id, review_id, f"{type(exc).__name__}: {exc}")
+                    self._record_failure(event_id, f"{type(exc).__name__}: {exc}")
                     outcome = EventOutcome(status="fail", error=str(exc))
                 summary.duplicate_samples += outcome.skipped
                 if outcome.status == "ok":
@@ -417,8 +411,6 @@ class Collector:
     def _process_event(
         self,
         event_id: str,
-        review_id: str,
-        reviewed_by_id: dict[str, bool | None] | None = None,
     ) -> EventOutcome:
         """Fetch one event, download clean frame(s), store sample(s).
 
@@ -483,14 +475,12 @@ class Collector:
                         debug("phash failed", event_id=event.id, error=str(exc))
 
                 box = event.box
-                reviewed_flag = (reviewed_by_id or {}).get(review_id)
                 sample = Sample(
                     id=sample_id,
                     camera=event.camera,
                     timestamp=frame_ts if frame_ts is not None else event.start_time,
                     event_id=event.id,
                     frame_index=frame_index,
-                    review_id=review_id,
                     image_path=str(image_path),
                     debug_image_path=str(debug_path) if debug_path else None,
                     image_hash=image_hash,
@@ -502,8 +492,6 @@ class Collector:
                     frigate_y1=box[1] if box else None,
                     frigate_x2=box[2] if box else None,
                     frigate_y2=box[3] if box else None,
-                    frigate_reviewed=(1 if reviewed_flag else 0) if reviewed_flag is not None else None,
-                    reviewed_at=utcnow() if reviewed_flag else None,
                     status="collected",
                 )
                 with self.db.session() as session:
@@ -547,7 +535,7 @@ class Collector:
             return EventOutcome(status="dup", stored=0, skipped=skipped)
         except FrigateAPIError as exc:
             error("event failed (api)", event_id=event_id, error=str(exc))
-            self._record_failure(event_id, review_id, f"{exc}")
+            self._record_failure(event_id, f"{exc}")
             return EventOutcome(status="fail", error=str(exc))
         except IntegrityError as exc:
             # concurrent duplicate insert from a second run in the same window
@@ -555,7 +543,7 @@ class Collector:
             return EventOutcome(status="dup", error=str(exc))
         except Exception as exc:
             error("event failed", event_id=event_id, error=str(exc))
-            self._record_failure(event_id, review_id, f"{type(exc).__name__}: {exc}")
+            self._record_failure(event_id, f"{type(exc).__name__}: {exc}")
             return EventOutcome(status="fail", error=str(exc))
 
     # --- storage helpers --------------------------------------------------
@@ -575,14 +563,13 @@ class Collector:
                 hasher.update(chunk)
         return hasher.hexdigest()
 
-    def _record_failure(self, event_id: str, review_id: str | None, error_text: str) -> None:
+    def _record_failure(self, event_id: str, error_text: str) -> None:
         try:
             with self.db.session() as session:
                 session.add(
                     CollectionFailure(
                         id=str(uuid.uuid4()),
                         event_id=event_id,
-                        review_id=review_id,
                         error=error_text[:2000],
                     )
                 )

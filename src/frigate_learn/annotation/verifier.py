@@ -76,13 +76,15 @@ class Verifier:
         days: int | None = None,
         since: str | None = None,
         force: bool = False,
+        record_job: bool = True,
     ) -> VerifySummary:
         """Verify unverified samples (or all when ``force``)."""
         started = datetime.now(timezone.utc)
         summary = VerifySummary()
         job_id = self.job_id or str(uuid.uuid4())
         summary.job_id = job_id
-        self._record_job(job_id, status="running")
+        if record_job:
+            self._record_job(job_id, status="running")
 
         from_ts: float | None = None
         if days is not None:
@@ -124,6 +126,13 @@ class Verifier:
         batch_size = max(1, self.config.vlm.batch_size)
         consecutive_errors = 0
         error_limit = max(1, self.config.vlm.max_consecutive_errors)
+        log_every = max(1, len(candidates) // 20)
+        info(
+            "verify started",
+            candidates=len(candidates),
+            batch_size=batch_size,
+            force=force,
+        )
         try:
             for start in range(0, len(candidates), batch_size):
                 batch = candidates[start : start + batch_size]
@@ -175,6 +184,19 @@ class Verifier:
                         debug("vlm rejection", sample_id=sample.id, error=str(exc))
                         summary.failed += 1
                         self._drop(sample, summary)
+                processed_so_far = min(start + batch_size, len(candidates))
+                if (
+                    processed_so_far % log_every == 0
+                    or processed_so_far >= len(candidates)
+                ):
+                    info(
+                        "verify progress",
+                        processed=processed_so_far,
+                        total=len(candidates),
+                        annotated=summary.annotated,
+                        failed=summary.failed,
+                        dropped=summary.dropped,
+                    )
             summary.duration_seconds = (
                 datetime.now(timezone.utc) - started
             ).total_seconds()
@@ -236,7 +258,7 @@ class Verifier:
 
     def _record_job(self, job_id: str, status: str) -> None:
         with self.db.session() as session:
-            session.add(Job(id=job_id, type="annotate", status=status, started_at=utcnow()))
+            session.add(Job(id=job_id, type="verify", status=status, started_at=utcnow()))
             session.commit()
 
     def _finish_job(self, job_id: str, summary: VerifySummary) -> None:

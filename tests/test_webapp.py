@@ -183,7 +183,7 @@ def _seed_db(db, image_path) -> None:
                 camera="back",
                 timestamp=100.0,
                 quality="bad",
-                status="reviewed",
+                status="imported",
                 verified=0,
                 created_at="2026-09-09T00:00:02+00:00",
             ),
@@ -271,8 +271,6 @@ def test_overview(seeded):
         "total": 3,
         "verified": 1,
         "unverified": 2,
-        "reviewed": 0,
-        "unreviewed": 0,
         "quality_useful": 1,
         "quality_bad": 1,
         "quality_duplicate": 0,
@@ -550,7 +548,7 @@ def test_samples_filters(seeded):
     assert [s["id"] for s in queries.samples(db, verified=1)["samples"]] == ["s1"]
     assert [s["id"] for s in queries.samples(db, quality="bad")["samples"]] == ["s3"]
     assert {s["id"] for s in queries.samples(db, camera="front")["samples"]} == {"s1", "s2"}
-    assert [s["id"] for s in queries.samples(db, status="reviewed")["samples"]] == ["s3"]
+    assert [s["id"] for s in queries.samples(db, status="imported")["samples"]] == ["s3"]
 
 
 def test_samples_verified_exact_match(seeded):
@@ -900,6 +898,103 @@ def test_job_log_tail_captures_logutil_lines(tmp_path, monkeypatch):
     db.dispose()
 
 
+def test_job_start_forwards_collection_options(tmp_path, monkeypatch):
+    cfg, db = _job_db(tmp_path)
+    manager = JobManager(cfg, db)
+    captured = {}
+
+    def _recording_stub(config, db, **kwargs):
+        captured.update(kwargs)
+        return _finished_reports()
+
+    monkeypatch.setattr("frigate_learn.webapp.jobs.run_pipeline", _recording_stub)
+    job_id = manager.start(
+        ["collect", "build"], dry_run=True, days=5, limit=40, keep_going=True,
+    )
+    _join_thread(manager)
+    result = manager.get(job_id)
+    assert captured["steps"] == ["collect", "build"]
+    assert captured["dry_run"] is True
+    assert captured["days"] == 5
+    assert captured["limit"] == 40
+    assert captured["keep_going"] is True
+    assert result["days"] == 5
+    assert result["limit"] == 40
+    assert result["keep_going"] is True
+    db.dispose()
+
+
+def test_job_start_audit_records_kind_and_stats(tmp_path, monkeypatch):
+    cfg, db = _job_db(tmp_path)
+    manager = JobManager(cfg, db)
+    captured = {}
+
+    def _audit_stub(config, *, resume=False, limit=None, sam_only=False):
+        captured.update(resume=resume, limit=limit, sam_only=sam_only)
+        return {
+            "total": 10, "processed": 8, "accepted": 6,
+            "dropped": 1, "pending": 1, "sam_fail": 0, "vlm_fail": 1,
+        }
+
+    monkeypatch.setattr("frigate_learn.audit.runner.run_audit", _audit_stub)
+    job_id = manager.start_audit(resume=True, limit=20, sam_only=False)
+    _join_thread(manager)
+    result = manager.get(job_id)
+    assert result["type"] == "audit"
+    assert result["status"] == "finished"
+    assert result["resume"] is True
+    assert result["limit"] == 20
+    assert result["sam_only"] is False
+    assert result["reports"][0]["name"] == "audit"
+    assert result["reports"][0]["status"] == "executed"
+    assert "accepted=6" in result["reports"][0]["message"]
+    assert captured["resume"] is True
+    assert captured["limit"] == 20
+    db.dispose()
+
+
+def test_job_start_audit_rejects_bad_limit(tmp_path):
+    cfg, db = _job_db(tmp_path)
+    manager = JobManager(cfg, db)
+    with pytest.raises(ValueError):
+        manager.start_audit(limit=0)
+    db.dispose()
+
+
+def test_job_start_audit_busy_raises(tmp_path, monkeypatch):
+    cfg, db = _job_db(tmp_path)
+    manager = JobManager(cfg, db)
+    event = threading.Event()
+
+    def _blocking_pipeline(config, db, **kwargs):
+        event.wait(timeout=10)
+        return _finished_reports()
+
+    monkeypatch.setattr("frigate_learn.webapp.jobs.run_pipeline", _blocking_pipeline)
+    manager.start(["collect"])
+    with pytest.raises(JobRunningError):
+        manager.start_audit()
+    event.set()
+    _join_thread(manager)
+    db.dispose()
+
+
+def test_job_constructor_marks_stale_audit_running_failed(tmp_path):
+    cfg, db = _job_db(tmp_path)
+    with db.session() as session:
+        session.add_all([
+            Job(id="stale1", type="pipeline", status="running", started_at=utcnow()),
+            Job(id="stale2", type="audit", status="running", started_at=utcnow()),
+        ])
+        session.commit()
+    JobManager(cfg, db)
+    with db.session() as session:
+        assert session.get(Job, "stale1").status == "failed"
+        assert session.get(Job, "stale2").status == "failed"
+        assert session.get(Job, "stale2").error == "terminated by server restart"
+    db.dispose()
+
+
 def test_job_recent_orders_by_started_at_desc_and_shapes(tmp_path):
     cfg, db = _job_db(tmp_path)
     long_tail = [f"line-{i}" for i in range(60)]
@@ -1011,7 +1106,7 @@ def _api_client(tmp_path, monkeypatch=None):
     _seed_db(db, tmp_path / "data" / "images" / "a.jpg")
     db.dispose()
     if monkeypatch is not None:
-        def _noop_pipeline(config, db, *, steps=None, dry_run=False):
+        def _noop_pipeline(config, db, *, steps=None, dry_run=False, **kwargs):
             return [StepReport(name=steps[0] if steps else "collect", status="executed", message="ok")]
         monkeypatch.setattr("frigate_learn.webapp.jobs.run_pipeline", _noop_pipeline)
     app = create_app(cfg)
@@ -1025,6 +1120,8 @@ def test_api_overview(tmp_path):
     body = r.json()
     assert body["steps"] == list(PIPELINE)
     assert body["samples"]["total"] == 3
+    assert body["collection"]["default_days"] == 7
+    assert body["collection"]["max_reviews"] is None
 
 
 def test_api_benchmark(tmp_path):
@@ -1123,36 +1220,9 @@ def test_api_samples_filters(tmp_path):
     r = c.get("/api/samples?camera=back")
     assert r.status_code == 200
     assert r.json()["total"] == 1
-    r = c.get("/api/samples?status=reviewed")
+    r = c.get("/api/samples?status=imported")
     assert r.status_code == 200
     assert r.json()["total"] == 1
-
-
-def test_api_samples_reviewed_filter(tmp_path):
-    cfg = build_config({"data": {"root": "data"}}, tmp_path)
-    db = Database(cfg.database_path())
-    db.init()
-    with db.session() as s:
-        s.add_all(
-            [
-                Sample(id="a", camera="front", timestamp=1.0, frigate_reviewed=1,
-                       status="collected"),
-                Sample(id="b", camera="front", timestamp=2.0, frigate_reviewed=0,
-                       status="collected"),
-                Sample(id="c", camera="front", timestamp=3.0, status="collected"),
-            ]
-        )
-        s.commit()
-    db.dispose()
-    c = TestClient(create_app(cfg))
-    reviewed = c.get("/api/samples?reviewed=1")
-    assert reviewed.status_code == 200
-    assert reviewed.json()["total"] == 1
-    assert reviewed.json()["samples"][0]["id"] == "a"
-    assert reviewed.json()["samples"][0]["reviewed"] == 1
-    unreviewed = c.get("/api/samples?reviewed=0")
-    assert unreviewed.json()["total"] == 1
-    assert unreviewed.json()["samples"][0]["id"] == "b"
 
 
 def test_api_samples_label_filter(tmp_path):
@@ -1163,53 +1233,6 @@ def test_api_samples_label_filter(tmp_path):
     dog = c.get("/api/samples?label=dog")
     assert dog.status_code == 200
     assert dog.json()["total"] == 0
-
-
-def test_api_quality_reviewed_counts(tmp_path):
-    cfg = build_config({"data": {"root": "data"}}, tmp_path)
-    db = Database(cfg.database_path())
-    db.init()
-    with db.session() as s:
-        s.add_all(
-            [
-                Sample(id="a", camera="front", timestamp=1.0, frigate_reviewed=1,
-                       status="collected"),
-                Sample(id="b", camera="front", timestamp=2.0, frigate_reviewed=0,
-                       status="collected"),
-            ]
-        )
-        s.commit()
-    db.dispose()
-    c = TestClient(create_app(cfg))
-    r = c.get("/api/quality")
-    assert r.status_code == 200
-    body = r.json()
-    assert body["reviewed"] == 1
-    assert body["unreviewed"] == 1
-
-
-def test_queries_samples_reviewed_filter(tmp_path):
-    cfg = build_config({}, tmp_path)
-    db = Database(cfg.database_path())
-    db.init()
-    with db.session() as s:
-        s.add_all(
-            [
-                Sample(id="a", camera="front", timestamp=1.0, frigate_reviewed=1,
-                       status="collected"),
-                Sample(id="b", camera="front", timestamp=2.0, frigate_reviewed=0,
-                       status="collected"),
-                Sample(id="c", camera="front", timestamp=3.0, status="collected"),
-            ]
-        )
-        s.commit()
-    by_id = {x["id"]: x for x in queries.samples(db)["samples"]}
-    assert by_id["a"]["reviewed"] == 1
-    assert by_id["b"]["reviewed"] == 0
-    assert by_id["c"]["reviewed"] is None
-    assert [x["id"] for x in queries.samples(db, reviewed=1)["samples"]] == ["a"]
-    assert [x["id"] for x in queries.samples(db, reviewed=0)["samples"]] == ["b"]
-    db.dispose()
 
 
 def test_api_sample_detail(tmp_path):
@@ -1266,6 +1289,35 @@ def test_api_jobs_run_success(tmp_path, monkeypatch):
     assert r2.json()["status"] == "finished"
 
 
+def test_api_jobs_run_with_collection_options(tmp_path, monkeypatch):
+    c, _ = _api_client(tmp_path, monkeypatch)
+    r = c.post("/api/jobs/run", json={
+        "steps": ["collect", "build"],
+        "days": 5,
+        "limit": 40,
+        "keep_going": True,
+    })
+    assert r.status_code == 202
+    job_id = r.json()["job_id"]
+    detail = c.get(f"/api/jobs/{job_id}").json()
+    assert detail["days"] == 5
+    assert detail["limit"] == 40
+    assert detail["keep_going"] is True
+
+
+def test_api_jobs_run_rejects_invalid_collection_options(tmp_path, monkeypatch):
+    c, _ = _api_client(tmp_path, monkeypatch)
+    for payload in (
+        {"steps": ["collect"], "days": 0},
+        {"steps": ["collect"], "days": -2},
+        {"steps": ["collect"], "limit": 0},
+        {"steps": ["collect"], "limit": "many"},
+        {"steps": ["collect"], "keep_going": "yes"},
+    ):
+        r = c.post("/api/jobs/run", json=payload)
+        assert r.status_code == 422, payload
+
+
 def test_api_jobs_run_empty_steps(tmp_path, monkeypatch):
     c, _ = _api_client(tmp_path, monkeypatch)
     r = c.post("/api/jobs/run", json={"steps": []})
@@ -1281,7 +1333,7 @@ def test_api_jobs_run_unknown_step(tmp_path, monkeypatch):
 def test_api_jobs_run_409(tmp_path, monkeypatch):
     event = _threading.Event()
 
-    def _blocking_pipeline(config, db, *, steps=None, dry_run=False):
+    def _blocking_pipeline(config, db, *, steps=None, dry_run=False, **kwargs):
         event.wait(timeout=10)
         return [StepReport(name="collect", status="executed", message="ok")]
 
@@ -1292,6 +1344,47 @@ def test_api_jobs_run_409(tmp_path, monkeypatch):
     r2 = c.post("/api/jobs/run", json={"steps": ["collect"], "dry_run": False})
     assert r2.status_code == 409
     assert r2.json()["detail"] == "a pipeline job is already running"
+    event.set()
+
+
+def test_api_jobs_audit_run(tmp_path, monkeypatch):
+    def _audit_stub(config, *, resume=False, limit=None, sam_only=False):
+        return {"processed": 8, "accepted": 6, "dropped": 1, "pending": 1}
+
+    monkeypatch.setattr("frigate_learn.audit.runner.run_audit", _audit_stub)
+    c, _ = _api_client(tmp_path)
+    r = c.post("/api/jobs/audit", json={
+        "resume": True, "limit": 30, "sam_only": False,
+    })
+    assert r.status_code == 202
+    job_id = r.json()["job_id"]
+    detail = c.get(f"/api/jobs/{job_id}").json()
+    assert detail["type"] == "audit"
+    assert detail["status"] == "finished"
+    assert detail["resume"] is True
+    assert detail["limit"] == 30
+    assert detail["sam_only"] is False
+
+
+def test_api_jobs_audit_rejects_bad_limit(tmp_path, monkeypatch):
+    c, _ = _api_client(tmp_path, monkeypatch)
+    r = c.post("/api/jobs/audit", json={"limit": 0})
+    assert r.status_code == 422
+
+
+def test_api_jobs_audit_409_while_pipeline_running(tmp_path, monkeypatch):
+    event = _threading.Event()
+
+    def _blocking_pipeline(config, db, *, steps=None, dry_run=False, **kwargs):
+        event.wait(timeout=10)
+        return [StepReport(name="collect", status="executed", message="ok")]
+
+    monkeypatch.setattr("frigate_learn.webapp.jobs.run_pipeline", _blocking_pipeline)
+    c, _ = _api_client(tmp_path)
+    r1 = c.post("/api/jobs/run", json={"steps": ["collect"]})
+    assert r1.status_code == 202
+    r2 = c.post("/api/jobs/audit", json={"resume": True})
+    assert r2.status_code == 409
     event.set()
 
 

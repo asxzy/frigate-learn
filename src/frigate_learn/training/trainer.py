@@ -10,6 +10,7 @@ dry marks.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -113,6 +114,87 @@ def _safe_before_after(
         return False
 
 
+class _UltralyticsLogForwarder(logging.Handler):
+    """Re-emit ultralytics records through the ``frigate_learn`` logger so the
+    webapp job tail (which only sees that logger) shows live training output."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.INFO)
+        self.setFormatter(logging.Formatter("%(message)s"))
+
+    def emit(self, record) -> None:
+        try:
+            line = self.format(record).strip()
+            if line:
+                for part in line.splitlines():
+                    info(f"[ultralytics] {part.strip()}")
+        except Exception:
+            pass
+
+
+def _epoch_progress_callback(trainer) -> None:
+    try:
+        metrics = dict(getattr(trainer, "metrics", None) or {})
+        kw: dict = {
+            "epoch": int(getattr(trainer, "epoch", -1)) + 1,
+            "epochs": int(getattr(trainer, "epochs", 0) or 0),
+        }
+        for label, key in (
+            ("mAP50", "mAP50(B)"),
+            ("recall", "R"),
+            ("precision", "P"),
+            ("loss", "train/box_loss"),
+        ):
+            value = metrics.get(key)
+            if value is not None:
+                kw[label] = round(float(value), 4)
+        info("train epoch", **kw)
+    except Exception:
+        pass
+
+
+def _attach_ultralytics_bridge(logger_name: str = "ultralytics"):
+    """Route the ultralytics logger through ours for the duration of training."""
+    forwarder = _UltralyticsLogForwarder()
+    target = logging.getLogger(logger_name)
+    previous = {
+        "level": target.level,
+        "handlers": list(target.handlers),
+    }
+    if target.level == logging.NOTSET or target.level > logging.INFO:
+        target.setLevel(logging.INFO)
+    for handler in list(target.handlers):
+        target.removeHandler(handler)
+    target.addHandler(forwarder)
+    return target, forwarder, previous
+
+
+def _forward_only(target, forwarder) -> None:
+    for handler in list(target.handlers):
+        if handler is not forwarder:
+            target.removeHandler(handler)
+
+
+def _attach_epoch_callback(likely_trainer, callback) -> None:
+    add_callback = getattr(likely_trainer, "add_callback", None)
+    if callable(add_callback):
+        try:
+            add_callback("on_fit_epoch_end", callback)
+        except (TypeError, AttributeError):
+            pass
+
+
+def _detach_ultralytics_bridge(target, forwarder, previous) -> None:
+    try:
+        target.removeHandler(forwarder)
+        target.setLevel(previous["level"])
+        for handler in previous["handlers"]:
+            if handler not in target.handlers:
+                target.addHandler(handler)
+    except Exception:
+        pass
+
+
 class Trainer:
     def __init__(self, config: AppConfig, db: Database) -> None:
         self.config = config
@@ -170,7 +252,9 @@ class Trainer:
         if dry_run:
             return self._dry_run_result(candidate.weights, dataset_version, run_dir, tag=tag)
 
+        bridge = None
         try:
+            bridge = _attach_ultralytics_bridge()
             if cfg.label_space == "coco80":
                 from .masked import MaskedDetectionTrainer
 
@@ -197,6 +281,8 @@ class Trainer:
                 trainer = MaskedDetectionTrainer(
                     overrides=overrides, trainable=trainable
                 )
+                _attach_epoch_callback(trainer, _epoch_progress_callback)
+                _forward_only(*bridge[:2])
                 trainer.train()
                 best = Path(trainer.best)
                 metrics = dict(trainer.metrics or {})
@@ -204,6 +290,8 @@ class Trainer:
                 from ultralytics import YOLO
 
                 model = YOLO(candidate.weights)
+                _attach_epoch_callback(model, _epoch_progress_callback)
+                _forward_only(*bridge[:2])
                 kwargs: dict = {
                     "seed": seed,
                 }
@@ -232,6 +320,9 @@ class Trainer:
                 "ultralytics/torch not installed; install the 'ml' extra on the "
                 "training machine (pip install -e '.[ml]')"
             ) from exc
+        finally:
+            if bridge is not None:
+                _detach_ultralytics_bridge(*bridge)
 
         info("training finished", model=model_name, best=str(best) if best.exists() else "n/a")
         return TrainResult(

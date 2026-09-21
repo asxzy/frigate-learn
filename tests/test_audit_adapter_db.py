@@ -32,10 +32,7 @@ CREATE TABLE samples (
 )
 """
 
-SCHEMA_ANNOTATIONS = SCHEMA.replace(
-    "    image_path TEXT,\n",
-    "    image_path TEXT,\n    review_id TEXT,\n",
-) + ";\n" + """
+SCHEMA_ANNOTATIONS = SCHEMA + ";\n" + """
 CREATE TABLE annotations (
     id TEXT PRIMARY KEY,
     sample_id TEXT,
@@ -153,7 +150,7 @@ def test_db_adapter_status_filter(tmp_path):
          "frigate_label": "person", "status": "collected",
          "frigate_x1": 0.0, "frigate_y1": 0.0, "frigate_x2": 0.5, "frigate_y2": 0.5},
         {"id": "nope", "image_path": "images/20240101/cam1/a.jpg",
-         "frigate_label": "person", "status": "reviewed",
+         "frigate_label": "person", "status": "imported",
          "frigate_x1": 0.0, "frigate_y1": 0.0, "frigate_x2": 0.5, "frigate_y2": 0.5},
     ])
     adapter = FrigateDatabaseAdapter(db, images_root=tmp_path, statuses=["collected"])

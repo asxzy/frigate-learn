@@ -33,6 +33,7 @@ import hashlib
 import shutil
 import subprocess
 import sys
+import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -40,7 +41,7 @@ from pathlib import Path
 from ..config import AppConfig
 from ..db import Database
 from ..evaluation.gate import GateResult, record_deployment
-from ..logutil import info, warning
+from ..logutil import debug, info, warning
 
 HAILO_ARCH = "hailo8"  # Hailo-8 (the Frigate box); not "hailo8l" from its docs
 DEFAULT_CALIB_SAMPLES = 64
@@ -124,6 +125,11 @@ def build_calibration_set(
     )
     if not frames:
         raise FileNotFoundError(f"no .jpg/.png calibration images in {image_dir}")
+    info(
+        "hailo calibration starting",
+        images=len(frames),
+        samples=min(samples, len(frames)),
+    )
     arrays = []
     for path in frames[:samples]:
         with Image.open(path) as raw:
@@ -132,7 +138,9 @@ def build_calibration_set(
     if not arrays:
         raise FileNotFoundError(f"no decodable calibration images in {image_dir}")
     out_npy.parent.mkdir(parents=True, exist_ok=True)
-    np.save(out_npy, np.stack(arrays))
+    stacked = np.stack(arrays)
+    np.save(out_npy, stacked)
+    info("hailo calibration built", images=len(arrays), shape=str(stacked.shape))
     return out_npy
 
 
@@ -161,10 +169,71 @@ class _DfcRunner:
                 "docker", "run", "--rm", "--platform", "linux/amd64",
                 "-v", f"{cwd}:/work", "-w", "/work", self.docker_image, *argv,
             ]
-            return subprocess.run(command, capture_output=True, text=True, check=False)
-        return subprocess.run(
-            [self.hailo, *argv[1:]], cwd=cwd, capture_output=True, text=True, check=False
-        )
+            proc = subprocess.Popen(
+                command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+            )
+        else:
+            command = [self.hailo, *argv[1:]]
+            proc = subprocess.Popen(
+                command,
+                cwd=cwd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+        stdout, stderr = _stream_subprocess(proc, stage=argv[1])
+        return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
+
+
+def _stream_subprocess(
+    proc: subprocess.Popen,
+    *,
+    stage: str,
+    chunk_size: int = 4096,
+) -> tuple[str, str]:
+    """Read a subprocess's output live, forwarding each progress line to the
+    logger while keeping the full text for error reporting."""
+
+    def reader(stream, sink):
+        pending = ""
+        while True:
+            chunk = stream.read(chunk_size)
+            if not chunk:
+                break
+            pending += chunk
+            while True:
+                lf = pending.find("\n")
+                cr = pending.find("\r")
+                if lf == -1 and cr == -1:
+                    break
+                if lf == -1:
+                    idx = cr
+                elif cr == -1:
+                    idx = lf
+                else:
+                    idx = min(lf, cr)
+                line, pending = pending[:idx], pending[idx + 1:]
+                line = line.strip()
+                if line:
+                    debug("hailo output", stage=stage, line=line)
+                    sink.append(line)
+        tail = pending.strip()
+        if tail:
+            debug("hailo output", stage=stage, line=tail)
+            sink.append(tail)
+
+    stdout_lines: list[str] = []
+    stderr_lines: list[str] = []
+    threads = [
+        threading.Thread(target=reader, args=(proc.stdout, stdout_lines), daemon=True),
+        threading.Thread(target=reader, args=(proc.stderr, stderr_lines), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    proc.wait()
+    for thread in threads:
+        thread.join()
+    return "\n".join(stdout_lines), "\n".join(stderr_lines)
 
 
 def compile_hailo(
@@ -243,6 +312,7 @@ def compile_hailo(
         ],
     ]
     for argv in stages:
+        info("hailo stage start", stage=argv[1], net=net, cwd=str(staging))
         result = runner.run(argv, cwd=staging)
         if result.returncode != 0:
             raise HailoCompileError(f"hailo {argv[1]} failed: {result.stderr[-2000:]}")
@@ -302,6 +372,14 @@ def deploy(
 
     onnx_path: Path | None = None
     hef_path: Path | None = None
+    info(
+        "deploy started",
+        model=model_name,
+        version=version,
+        imgsz=imgsz,
+        hw_arch=hw_arch,
+        dry_run=dry_run,
+    )
     if weights.suffix == ".onnx":
         onnx_path = weights
     else:
@@ -309,7 +387,9 @@ def deploy(
             onnx_path = models_dir / f"{model_name}.onnx"
             onnx_path.write_text("# dry-run placeholder ONNX\n", encoding="utf-8")
         else:
+            info("onnx export start", model=model_name, weights=str(weights))
             onnx_path = export_onnx(Path(weights), models_dir, imgsz=imgsz)
+            info("onnx export done", model=model_name, onnx=onnx_path.name)
     hef_path = compile_hailo(
         onnx_path,
         models_dir,

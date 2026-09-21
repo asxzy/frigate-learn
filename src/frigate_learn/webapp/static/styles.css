@@ -339,7 +339,6 @@ button.btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .thumb .pill { font-size: 11px; margin-left: 4px; }
 
 .thumb .badge-verify { position: absolute; top: 6px; right: 6px; color: var(--lime); font-weight: 700; font-size: 13px; text-shadow: 0 0 4px #000; }
-.thumb .badge-review { position: absolute; top: 6px; right: 24px; color: var(--blue); font-weight: 700; font-size: 11px; text-shadow: 0 0 4px #000; }
 
 .filter-bar {
   display: flex;
@@ -488,6 +487,56 @@ ul.reasons { margin: 0; padding-left: 16px; }
   border-radius: 10px;
   padding: 14px 16px;
   margin-bottom: 20px;
+}
+
+.audit-run {
+  margin-top: 14px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
+}
+
+.audit-run .card-title { margin-top: 0; }
+
+.run-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 18px;
+  margin: 10px 0;
+  padding: 10px 12px;
+  background: var(--panel2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.option {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.option-wide { flex-basis: 240px; }
+
+.option-label {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.option input[type="number"] {
+  width: 72px;
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+}
+
+.option-wide input[type="number"] { width: 100px; }
+
+.option-unit {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .step-grid {

@@ -35,7 +35,7 @@ sample.
 - **Webapp (`frigate-learn web`):** FastAPI backend (`webapp/{app,api,queries,
   serving,jobs}.py`) + no-build vanilla-JS SPA (`webapp/static/`). 22 endpoints
   under `/api/*`, seven views (Overview, Benchmark,
-  Quality, Audit, Datasets, Training, Triage lightbox), pipeline stages run
+  Quality, Audit, Datasets, Training, Samples gallery), pipeline stages run
   in a background daemon thread (`jobs.py` JobManager, single job at a time,
   `jobs` SQLite ledger, bounded log tail). Localhost-only, no auth/CORS.
 

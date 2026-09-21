@@ -60,12 +60,48 @@ class JobManager:
             session.execute(
                 update(Job)
                 .where(Job.status == "running")
-                .where(Job.type == "pipeline")
+                .where(Job.type.in_(("pipeline", "audit")))
                 .values(status="failed", error=_STALE_ERROR)
             )
             session.commit()
 
-    def start(self, steps: list[str], *, dry_run: bool = False) -> str:
+    def start_audit(
+        self,
+        *,
+        resume: bool = False,
+        limit: int | None = None,
+        sam_only: bool = False,
+    ) -> str:
+        if limit is not None and limit < 1:
+            raise ValueError("limit must be >= 1")
+        with self._start_lock:
+            if (self._thread and self._thread.is_alive()) or self._running_job_id():
+                raise JobRunningError("a job is already running")
+            job_id = uuid4().hex[:12]
+            with self.db.session() as session:
+                session.add(
+                    Job(id=job_id, type="audit", status="running", started_at=utcnow())
+                )
+                session.commit()
+            self._job_id = job_id
+            self._tail = []
+            self._thread = threading.Thread(
+                target=self._run_audit,
+                args=(job_id, resume, limit, sam_only),
+                daemon=True,
+            )
+            self._thread.start()
+            return job_id
+
+    def start(
+        self,
+        steps: list[str],
+        *,
+        dry_run: bool = False,
+        days: int | None = None,
+        limit: int | None = None,
+        keep_going: bool = False,
+    ) -> str:
         if not steps:
             raise ValueError("steps must not be empty")
         for step in steps:
@@ -83,12 +119,22 @@ class JobManager:
             self._job_id = job_id
             self._tail = []
             self._thread = threading.Thread(
-                target=self._run, args=(job_id, steps, dry_run), daemon=True
+                target=self._run,
+                args=(job_id, steps, dry_run, days, limit, keep_going),
+                daemon=True,
             )
             self._thread.start()
             return job_id
 
-    def _run(self, job_id: str, steps: list[str], dry_run: bool) -> None:
+    def _run(
+        self,
+        job_id: str,
+        steps: list[str],
+        dry_run: bool,
+        days: int | None,
+        limit: int | None,
+        keep_going: bool,
+    ) -> None:
         logger = logging.getLogger("frigate_learn")
         handler = _TailHandler(self._append_tail)
         logger.addHandler(handler)
@@ -97,9 +143,19 @@ class JobManager:
         reports: list[StepReport] = []
         error: str | None = None
         try:
+            logger.info(
+                "job started steps=%s dry_run=%s days=%s limit=%s keep_going=%s",
+                steps, dry_run, days, limit, keep_going,
+            )
             try:
                 reports = run_pipeline(
-                    self.config, self.db, steps=steps, dry_run=dry_run
+                    self.config,
+                    self.db,
+                    steps=steps,
+                    dry_run=dry_run,
+                    days=days,
+                    limit=limit,
+                    keep_going=keep_going,
                 )
                 if any(r.status == "failed" for r in reports):
                     error = next(
@@ -125,7 +181,79 @@ class JobManager:
                 {
                     "steps": steps,
                     "dry_run": dry_run,
+                    "days": days,
+                    "limit": limit,
+                    "keep_going": keep_going,
                     "reports": [_report_dict(r) for r in reports],
+                    "log_tail": tail,
+                }
+            )
+            session.commit()
+
+    def _run_audit(
+        self,
+        job_id: str,
+        resume: bool,
+        limit: int | None,
+        sam_only: bool,
+    ) -> None:
+        from ..audit.runner import AuditRunError, run_audit
+
+        logger = logging.getLogger("frigate_learn")
+        handler = _TailHandler(self._append_tail)
+        logger.addHandler(handler)
+        previous_level = logger.level
+        logger.setLevel(logging.DEBUG)
+        stats: dict = {}
+        error: str | None = None
+        try:
+            logger.info(
+                "job started type=audit resume=%s limit=%s sam_only=%s",
+                resume, limit, sam_only,
+            )
+            try:
+                stats = run_audit(
+                    self.config,
+                    resume=resume,
+                    limit=limit,
+                    sam_only=sam_only,
+                )
+                message = (
+                    f"processed={stats.get('processed')} "
+                    f"accepted={stats.get('accepted')} "
+                    f"dropped={stats.get('dropped')} "
+                    f"pending={stats.get('pending')}"
+                )
+                reports = [{"name": "audit", "status": "executed", "message": message}]
+                status = "finished"
+            except AuditRunError as exc:
+                status = "failed"
+                error = str(exc)
+                reports = [{"name": "audit", "status": "failed", "message": str(exc)}]
+            except Exception as exc:
+                status = "failed"
+                error = str(exc)
+                reports = [{"name": "audit", "status": "failed", "message": str(exc)}]
+            with self._tail_lock:
+                tail = list(self._tail)
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(previous_level)
+        with self.db.session() as session:
+            job = session.get(Job, job_id)
+            if job is None:
+                return
+            job.status = status
+            job.error = error
+            job.finished_at = utcnow()
+            job.metadata_json = json.dumps(
+                {
+                    "kind": "audit",
+                    "resume": resume,
+                    "limit": limit,
+                    "sam_only": sam_only,
+                    "reports": reports,
+                    "stats": stats,
                     "log_tail": tail,
                 }
             )
@@ -202,10 +330,9 @@ def _parse_metadata(value: str | None) -> dict:
         return {"reports": [], "log_tail": []}
     reports = data.get("reports")
     log_tail = data.get("log_tail")
-    return {
-        "reports": reports if isinstance(reports, list) else [],
-        "log_tail": log_tail if isinstance(log_tail, list) else [],
-    }
+    data["reports"] = reports if isinstance(reports, list) else []
+    data["log_tail"] = log_tail if isinstance(log_tail, list) else []
+    return data
 
 
 def _job_item(job: Job, *, truncate_tail: bool = False) -> dict:
@@ -220,6 +347,11 @@ def _job_item(job: Job, *, truncate_tail: bool = False) -> dict:
         "started_at": job.started_at,
         "finished_at": job.finished_at,
         "error": job.error,
+        "days": metadata.get("days"),
+        "limit": metadata.get("limit"),
+        "keep_going": metadata.get("keep_going"),
+        "resume": metadata.get("resume"),
+        "sam_only": metadata.get("sam_only"),
         "reports": metadata["reports"],
         "log_tail": log_tail,
     }

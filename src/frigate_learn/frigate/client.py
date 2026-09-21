@@ -28,6 +28,7 @@ from .snapshots import (
 )
 
 logger = logging.getLogger(__name__)
+debug = logger.debug
 
 _RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 
@@ -121,6 +122,13 @@ class FrigateClient:
             except (httpx.ConnectError, httpx.ConnectTimeout, httpx.ReadTimeout) as exc:
                 if attempt < self.max_retries:
                     attempt += 1
+                    debug(
+                        "frigate request retrying",
+                        method=method,
+                        path=path,
+                        attempt=attempt,
+                        reason=str(exc),
+                    )
                     self._backoff(attempt)
                     continue
                 raise FrigateAPIError(
@@ -131,6 +139,13 @@ class FrigateClient:
 
             if response.status_code in _RETRYABLE_STATUS and attempt < self.max_retries:
                 attempt += 1
+                debug(
+                    "frigate request retrying",
+                    method=method,
+                    path=path,
+                    attempt=attempt,
+                    status=response.status_code,
+                )
                 self._backoff(attempt)
                 continue
 
@@ -257,6 +272,7 @@ class FrigateClient:
                 )
             if not batch:
                 break
+            debug("frigate review page", count=len(batch), cursor=cursor)
 
             oldest = None
             for raw in batch:
@@ -327,6 +343,7 @@ class FrigateClient:
                 )
             if not batch:
                 break
+            debug("frigate events page", count=len(batch), cursor=cursor)
 
             oldest = None
             for raw in batch:
@@ -445,6 +462,7 @@ class FrigateClient:
         if not content:
             raise FrigateAPIError("empty download", url=path, retryable=True)
         destination.write_bytes(content)
+        debug("frigate download", path=path, bytes=len(content), dest=destination.name)
         return str(destination.resolve())
 
     # --- motion -----------------------------------------------------------

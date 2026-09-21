@@ -3,8 +3,7 @@
 API facts (isolated here):
 
 - ``GET /api/review`` lists review segments as a plain JSON array.
-- Each item has ``id/camera/start_time/end_time/severity/thumb_path/data``
-  (``has_been_reviewed`` may also be present on the list endpoint).
+- Each item has ``id/camera/start_time/end_time/severity/thumb_path/data``.
 - ``data.detections`` is a list of **event ids** (strings). ``data.objects`` is a
   list of labels. Older 0.16/0.17 formats carried dicts in both lists; the
   parsers below accept both shapes.
@@ -29,7 +28,6 @@ class Review:
     thumb_path: str
     start_time: float
     end_time: float | None
-    has_been_reviewed: bool | None
     data: dict[str, Any] = field(default_factory=dict)
     zones: list[str] = field(default_factory=list)
 
@@ -92,16 +90,9 @@ def parse_review(raw: Mapping[str, Any]) -> Review:
         thumb_path=str(raw.get("thumb_path", "") or ""),
         start_time=parse_ts(raw.get("start_time")) or 0.0,
         end_time=parse_ts(raw.get("end_time")),
-        has_been_reviewed=_optional_bool(raw.get("has_been_reviewed")),
         data=data,
         zones=[str(z) for z in (raw.get("zones") or [])],
     )
-
-
-def _optional_bool(value: Any) -> bool | None:
-    if value is None:
-        return None
-    return bool(value)
 
 
 def extract_event_ids(review: Review) -> list[str]:

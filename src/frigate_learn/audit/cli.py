@@ -75,10 +75,21 @@ def run_cmd(
     if not in_path.exists():
         raise click.ClickException(f"Input path does not exist: {in_path}")
 
-    adapter = _build_adapter(in_path)
-    sam_teacher = _build_sam(audit)
-    reconciler = _build_vlm(audit)
-    gates = _build_gates(audit)
+    from .runner import (
+        AuditRunError,
+        build_adapter,
+        build_gates,
+        build_reconciler,
+        build_sam_teacher,
+    )
+
+    try:
+        adapter = build_adapter(in_path)
+        sam_teacher = build_sam_teacher(audit)
+        reconciler = build_reconciler(audit)
+        gates = build_gates(audit)
+    except AuditRunError as exc:
+        raise click.ClickException(str(exc)) from exc
 
     hn_enabled = audit.hard_negatives_enabled if not no_hard_negatives else False
     neg_enabled = audit.negative_sampling_enabled
@@ -154,88 +165,6 @@ def stats_cmd(audit_dir: Path, as_json: bool) -> None:
     else:
         stats = scan_audit_dir(audit_dir)
         click.echo(render_stats(stats))
-
-
-def _build_adapter(input_path: Path):
-    """Build a DatasetAdapter from the input path.
-
-    Recognizes, in order: a SQLite database file (``--input data/frigate.db`` or
-    ``data/frigate_learn.db``), a dataset root containing either database
-    (images are resolved against ``<root>/images``), and a manifest root
-    (``annotations/manifest.json`` or ``manifest.json`` at the root).
-    """
-    from .adapter import FrigateDatabaseAdapter, ManifestDatasetAdapter
-
-    if input_path.is_file() and input_path.suffix == ".db":
-        return FrigateDatabaseAdapter(input_path)
-    for db_name in ("frigate_learn.db", "frigate.db"):
-        db_file = input_path / db_name
-        if db_file.is_file():
-            return FrigateDatabaseAdapter(db_file, images_root=input_path / "images")
-    if ((input_path / "annotations" / "manifest.json").is_file()
-            or (input_path / "manifest.json").is_file()):
-        return ManifestDatasetAdapter(input_path)
-    raise click.ClickException(
-        f"No database (frigate_learn.db|frigate.db) or manifest.json found in {input_path}"
-    )
-
-
-def _build_sam(audit) -> object:
-    """Build the SAM teacher from config (local MLX or remote endpoint)."""
-    if audit.sam.backend == "http":
-        from .sam import HttpSamTeacher
-
-        if not audit.sam.base_url:
-            raise click.ClickException(
-                "audit.models.sam.backend=http requires audit.models.sam.base_url"
-                " (URL of a frigate-learn sam-server endpoint)"
-            )
-        return HttpSamTeacher(
-            base_url=audit.sam.base_url,
-            api_key=audit.sam.api_key,
-            model=audit.sam.model,
-            timeout_seconds=audit.sam.timeout_seconds,
-            max_retries=audit.sam.max_retries,
-        )
-    from .sam import MlxSam3Teacher
-
-    return MlxSam3Teacher(
-        checkpoint_path=audit.sam.checkpoint or None,
-        load_from_hf=audit.sam.load_from_hf,
-        hf_repo=audit.sam.hf_repo,
-        quantize_bits=audit.sam.quantize_bits,
-        resolution=audit.sam.resolution,
-        confidence_threshold=audit.sam.confidence_threshold,
-        candidate_classes=list(audit.sam.candidate_classes),
-    )
-
-
-def _build_vlm(audit) -> object:
-    """Build the VLM reconciler from config."""
-    from .vlm import build_reconciler
-
-    return build_reconciler(
-        base_url=audit.vlm.base_url,
-        model=audit.vlm.model,
-        api_key=audit.vlm.api_key,
-        temperature=audit.vlm.temperature,
-        timeout_seconds=audit.vlm.timeout_seconds,
-        max_retries=audit.vlm.max_retries,
-        json_mode=audit.vlm.json_mode,
-    )
-
-
-def _build_gates(audit) -> object:
-    """Build GeometryThresholds from config."""
-    from .decision import GeometryThresholds
-
-    return GeometryThresholds(
-        min_mask_area=audit.geometry.min_mask_area,
-        min_bbox_iou=audit.geometry.min_bbox_iou,
-        mask_bbox_ratio_min=audit.geometry.mask_bbox_ratio_min,
-        mask_bbox_ratio_max=audit.geometry.mask_bbox_ratio_max,
-        min_mask_frigate_containment=audit.geometry.min_mask_frigate_containment,
-    )
 
 
 def _ledger_db_path(config) -> str | None:

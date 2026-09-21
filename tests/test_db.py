@@ -33,14 +33,15 @@ def test_migrations_idempotent(db):
 
 def test_applied_and_pending(db):
     applied = db.applied_migrations()
-    assert len(applied) == 4
+    assert len(applied) == 5
     assert applied == [
         "0001_initial.sql",
         "0002_multiframe_phash.sql",
         "0003_review_sync.sql",
         "0004_multi_object.sql",
+        "0005_drop_review.sql",
     ]
-    assert db.schema_version() == 4
+    assert db.schema_version() == 5
 
 
 def test_0004_adds_annotation_event_id(db):
@@ -79,16 +80,21 @@ def test_0004_rejects_duplicate_sample_event(db):
         s.commit()
 
 
-def test_0003_adds_review_sync_columns(db):
+def test_0005_drops_review_columns(db):
     from sqlalchemy import text
 
     with db.engine.connect() as conn:
-        cols = {
+        sample_cols = {
             row[1]
             for row in conn.execute(text("PRAGMA table_info(samples)"))
         }
-    for column in ("frigate_reviewed", "reviewed_at"):
-        assert column in cols
+        failure_cols = {
+            row[1]
+            for row in conn.execute(text("PRAGMA table_info(collection_failures)"))
+        }
+    for column in ("frigate_reviewed", "reviewed_at", "review_id"):
+        assert column not in sample_cols
+    assert "review_id" not in failure_cols
 
 
 def test_0002_adds_sampling_columns(db):

@@ -48,11 +48,6 @@ collection:
   # collection. region_crop_height falls back to training.image_size when null.
   region_crop: true
   region_crop_height: null
-  # review-sync policy: if the operator marks a Frigate review segment as
-  # reviewed in Frigate's own Review UI, samples under that segment get
-  # quality=useful when they have no explicit verdict yet (the raw flag is
-  # always mirrored into samples.frigate_reviewed).
-  review_auto_useful: true
 
 sampling:
   # P3 - temporal sampling within an event. Off by default; when enabled,

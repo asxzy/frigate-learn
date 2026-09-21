@@ -82,7 +82,10 @@ def import_coco(
 
     summary = ImportSummary()
     images_dir = Path(images_dir)
-    for image_id in sorted(images):
+    total_images = len(images)
+    log_every = max(1, total_images // 10)
+    info("coco import starting", images=total_images, camera=camera)
+    for image_index, image_id in enumerate(sorted(images), start=1):
         meta = images[image_id]
         file_name = str(meta.get("file_name") or meta.get("id"))
         src = images_dir / file_name
@@ -170,6 +173,15 @@ def import_coco(
         summary.images += 1
         summary.objects += len(mapped)
         summary.samples_written += 1
+        if image_index % log_every == 0 or image_index == total_images:
+            info(
+                "coco import progress",
+                processed=image_index,
+                total=total_images,
+                written=summary.samples_written,
+                skipped_missing=summary.skipped_missing,
+                skipped_unmapped=summary.skipped_unmapped,
+            )
 
     info(
         "coco import finished",

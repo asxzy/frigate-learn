@@ -368,7 +368,6 @@ class FrigateDatabaseAdapter(DatasetAdapter):
         score: Any,
         *,
         annotation_id: Any = None,
-        review_id: Any = None,
     ) -> Iterator[FrigateObject]:
         if x2 <= x1 or y2 <= y1:
             self._count_skip("degenerate_box")
@@ -403,8 +402,6 @@ class FrigateDatabaseAdapter(DatasetAdapter):
         }
         if annotation_id is not None:
             extra["annotation_id"] = annotation_id
-        if review_id is not None:
-            extra["review_id"] = review_id
         yield FrigateObject(
             sample_id=str(object_id),
             image_path=str(image_path),
@@ -433,7 +430,7 @@ class FrigateDatabaseAdapter(DatasetAdapter):
         sql = (
             "SELECT a.id, a.sample_id, s.image_path, a.label, "
             "a.x1, a.y1, a.x2, a.y2, s.camera, s.timestamp, "
-            "a.event_id, a.confidence, s.review_id "
+            "a.event_id, a.confidence "
             "FROM annotations a JOIN samples s ON s.id = a.sample_id "
             "WHERE " + " AND ".join(where)
         )
@@ -458,7 +455,6 @@ class FrigateDatabaseAdapter(DatasetAdapter):
                     timestamp,
                     event_id,
                     score,
-                    review_id,
                 ) = row
                 yield from self._yield_object(
                     str(annotation_id),
@@ -474,7 +470,6 @@ class FrigateDatabaseAdapter(DatasetAdapter):
                     event_id,
                     score,
                     annotation_id=str(annotation_id),
-                    review_id=review_id,
                 )
 
     def _iter_sample_objects(self) -> Iterator[FrigateObject]:

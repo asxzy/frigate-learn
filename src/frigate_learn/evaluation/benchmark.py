@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol, Sequence
 
+from ..logutil import info
 from .golden import GoldenDataset
 from .metrics import (
     DetectionMetrics,
@@ -104,6 +105,7 @@ def golden_to_examples(golden: GoldenDataset, classes: Sequence[str], limit: int
         examples.append(Example(image_path=sample.image_path, ground_truth=gt))
         if limit is not None and len(examples) >= limit:
             break
+    info("golden examples loaded", count=len(examples))
     return examples
 
 
@@ -128,21 +130,40 @@ def evaluate_backend(
     latencies: list[float] = []
     truths: list[GroundTruth] = []
 
+    total = len(examples)
+    info("benchmark started", candidate=backend.name, examples=total)
+    log_every = max(1, total // 10)
+
     for _ in range(config.warmup):
         if examples:
             backend.predict(examples[0].image_path, confidence=config.confidence)
 
-    for example in examples:
+    for index, example in enumerate(examples, start=1):
         truths.extend(example.ground_truth)
         start = time.perf_counter()
         preds = backend.predict(example.image_path, confidence=config.confidence)
         latencies.append((time.perf_counter() - start) * 1000.0)
         predictions.extend(preds)
+        if index % log_every == 0 or index == total:
+            info(
+                "benchmark progress",
+                candidate=backend.name,
+                processed=index,
+                total=total,
+            )
 
     metrics = (evaluator or _default_evaluator(config)).evaluate(predictions, truths)
     metrics.latency_ms = statistics.mean(latencies) if latencies else None
     if metrics.latency_ms:
         metrics.throughput_fps = 1000.0 / metrics.latency_ms
+    info(
+        "benchmark finished",
+        candidate=backend.name,
+        processed=total,
+        map50=round(metrics.map50, 4),
+        recall=round(metrics.recall, 4),
+        latency_ms=round(metrics.latency_ms, 2) if metrics.latency_ms else None,
+    )
     return metrics
 
 

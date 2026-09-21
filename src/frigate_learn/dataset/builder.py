@@ -30,6 +30,7 @@ from pathlib import Path
 from ..classes import coco_index
 from ..config import AppConfig
 from ..db import Database
+from ..logutil import info
 from ..models import Sample
 from .manifest import append_record, iter_manifest
 from .splits import VALID_SPLITS, assign_split
@@ -108,7 +109,10 @@ class DatasetBuilder:
         # deterministic order so per-class caps are stable across runs
         rows = sorted(rows, key=lambda s: (s.camera, s.timestamp, s.id))
 
-        for sample in rows:
+        info("build started", version=version, samples=summary.total)
+        log_every = max(1, summary.total // 10)
+
+        for index, sample in enumerate(rows, start=1):
             anns = self._best_annotations(sample, verified_only=verified_only)
             if not anns:
                 summary.skipped_no_box += 1
@@ -176,6 +180,14 @@ class DatasetBuilder:
                     "created_at": datetime.now(timezone.utc).isoformat(),
                 },
             )
+            if index % log_every == 0 or index == summary.total:
+                info(
+                    "build progress",
+                    version=version,
+                    processed=index,
+                    total=summary.total,
+                    written=summary.images_written,
+                )
 
         from ..evaluation.golden import write_dataset_yaml as _write_dataset_yaml
 
@@ -212,6 +224,15 @@ class DatasetBuilder:
         if trainable is not None:
             payload["trainable"] = trainable
         self._write_build_json(target / "build.json", payload)
+        info(
+            "build finished",
+            version=version,
+            total=summary.total,
+            written=summary.images_written,
+            skipped_no_box=summary.skipped_no_box,
+            skipped_class=summary.skipped_class,
+            skipped_cap=summary.skipped_cap,
+        )
         return summary
 
     # --- internals --------------------------------------------------------

@@ -119,39 +119,6 @@ class SharedFrameFake(FakeFrigate):
         return str(dest)
 
 
-def test_reviewed_flag_stored_on_collect(config, db):
-    config.collection.region_crop = False
-    review = _review("r1", "front", 200, ["e1"])
-    review["has_been_reviewed"] = True
-    fake = FakeFrigate(
-        reviews_raw=[review],
-        events_raw={"e1": _event("e1", "front", "person", 200)},
-    )
-    collector = Collector(config, db, client=fake)
-    collector.collect(from_ts=0)
-
-    with db.session() as s:
-        row = s.query(Sample).one()
-    assert row.frigate_reviewed == 1
-    assert row.reviewed_at
-
-
-def test_reviewed_flag_unset_on_collect(config, db):
-    config.collection.region_crop = False
-    review = _review("r1", "front", 200, ["e1"])
-    review["has_been_reviewed"] = False
-    fake = FakeFrigate(
-        reviews_raw=[review],
-        events_raw={"e1": _event("e1", "front", "person", 200)},
-    )
-    Collector(config, db, client=fake).collect(from_ts=0)
-
-    with db.session() as s:
-        row = s.query(Sample).one()
-    assert row.frigate_reviewed == 0
-    assert row.reviewed_at is None
-
-
 def test_happy_path(config, db, tmp_path):
     config.collection.region_crop = False
     fake = FakeFrigate(
@@ -185,7 +152,6 @@ def test_happy_path(config, db, tmp_path):
     assert row.frigate_label == "person"
     assert row.frigate_score == 0.9
     assert (row.frigate_x1, row.frigate_y1, row.frigate_x2, row.frigate_y2) == (0.1, 0.2, 0.4, 0.8)
-    assert row.review_id == "r1"
     image = Path(row.image_path)
     assert image.is_file()
     assert row.image_hash == hashlib.sha256(image.read_bytes()).hexdigest()
@@ -584,3 +550,12 @@ def test_delete_event_merged_removes_only_that_annotation(config, db):
         assert s.query(Sample).count() == 0
         assert s.query(Annotation).count() == 0
     assert not image.exists()
+
+
+def test_collect_record_job_false_records_no_job(config, db):
+    config.collection.region_crop = False
+    collector = Collector(config, db, client=FakeFrigate(reviews_raw=[], events_raw={}))
+    collector.collect(from_ts=0, record_job=False)
+    with db.session() as s:
+        count = s.execute(text("SELECT COUNT(*) FROM jobs")).scalar()
+    assert count == 0

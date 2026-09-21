@@ -3,6 +3,41 @@ const QUALITIES = ["useful", "bad", "duplicate", "ignore"];
 const MAP50_KEY = "metrics/mAP50(B)";
 const RECALL_KEY = "metrics/recall(B)";
 
+const QUALITY_LABELS = {
+  useful: "Useful",
+  bad: "Bad",
+  duplicate: "Duplicate",
+  ignore: "Ignore",
+};
+
+const QUALITY_DESC = {
+  useful: "keep — usable detection, good for training",
+  bad: "reject — no usable object or corrupt frame",
+  duplicate: "reject — same detection as another sample",
+  ignore: "exclude — not relevant to this model",
+};
+
+const STEP_LABELS = {
+  collect: ["Collect", "pull new detections and snapshots from Frigate"],
+  verify: ["Verify", "label unverified samples with the VLM and write verified annotations"],
+  build: ["Build", "emit a versioned YOLO dataset with deterministic splits"],
+  train: ["Train", "fine-tune the configured YOLO model on the latest dataset"],
+  benchmark: ["Benchmark", "score candidates against the golden dataset"],
+  gate: ["Gate", "compare candidates with the baseline and record the verdict"],
+  deploy: ["Deploy", "compile the winning weights to HEF for Hailo"],
+};
+
+const JOB_KIND_LABELS = {
+  pipeline: "Pipeline",
+  audit: "Audit",
+  collect: "Collect",
+  verify: "Verify",
+};
+
+function jobKindLabel(type) {
+  return JOB_KIND_LABELS[type] || type;
+}
+
 const $ = (sel) => document.querySelector(sel);
 const section = (name) => $("#view-" + name);
 
@@ -75,10 +110,11 @@ function pill(cls, text) {
   return `<span class="pill ${esc(cls)}">${esc(text)}</span>`;
 }
 
-function pillNode(text, quality) {
+function pillNode(text, quality, title) {
   const span = document.createElement("span");
   span.className = "pill " + (quality || "");
   span.textContent = text;
+  if (title) span.title = title;
   return span;
 }
 
@@ -108,32 +144,72 @@ function errorBox(container, message) {
 function renderPipelinePanel(data) {
   const panel = h("div", "pipeline-panel");
   panel.appendChild(h("h2", "card-title", "Run pipeline"));
-  panel.appendChild(h("div", "status-line",
-    "runs the selected stages as one job in this server (one job at a time)"));
   const steps = data.steps || [];
   const enabled = new Set(data.auto_enable || []);
   const selected = new Set(steps.length ? (enabled.size ? enabled : steps) : []);
   const grid = h("div", "step-grid");
   const checks = new Map();
   for (const step of steps) {
+    const [label, desc] = STEP_LABELS[step] || [step, ""];
     const lab = h("label", null);
     const cb = document.createElement("input");
     cb.type = "checkbox";
     cb.checked = selected.has(step);
     cb.value = step;
     lab.appendChild(cb);
-    lab.appendChild(document.createTextNode(step));
+    lab.appendChild(document.createTextNode(label));
+    lab.title = step + (desc ? " — " + desc : "");
     grid.appendChild(lab);
     checks.set(step, cb);
   }
   panel.appendChild(grid);
+  panel.appendChild(h("div", "status-line",
+    "selected stages run in order as one job; only one job runs at a time"));
+
+  const collect = data.collection || {};
+  const runOptions = h("div", "run-options");
+  const daysWrap = h("div", "option");
+  daysWrap.appendChild(h("span", "option-label", "Collect lookback"));
+  const daysInput = document.createElement("input");
+  daysInput.type = "number";
+  daysInput.min = "1";
+  daysInput.step = "1";
+  daysInput.value = String(collect.default_days || 7);
+  daysInput.title = "How many days of Frigate history the collect stage pulls (defaults to collection.default_days in config).";
+  daysWrap.appendChild(daysInput);
+  daysWrap.appendChild(h("span", "option-unit", "days"));
+  runOptions.appendChild(daysWrap);
+  const limitWrap = h("div", "option option-wide");
+  limitWrap.appendChild(h("span", "option-label", "Max items to import"));
+  const limitInput = document.createElement("input");
+  limitInput.type = "number";
+  limitInput.min = "1";
+  limitInput.step = "1";
+  limitInput.placeholder = "unlimited";
+  limitInput.title = "Cap on how many segments the collect stage imports (empty = collection.max_reviews / max_events in config).";
+  limitWrap.appendChild(limitInput);
+  limitWrap.appendChild(h("span", "option-unit", "items"));
+  runOptions.appendChild(limitWrap);
+  panel.appendChild(runOptions);
+
+  if (!data.vlm_enabled) {
+    panel.appendChild(h("div", "audit-banner",
+      "VLM is disabled (vlm.enabled=false) — the Verify stage will be skipped until it is enabled."));
+  }
+
   const controls = h("div", "buttons-row");
   const dryLab = h("label", null);
   const dry = document.createElement("input");
   dry.type = "checkbox";
   dryLab.appendChild(dry);
-  dryLab.appendChild(document.createTextNode(" dry run"));
+  dryLab.appendChild(document.createTextNode(" Dry run"));
   dryLab.title = "validate and report without writing data";
+  const keepLab = h("label", null);
+  const keep = document.createElement("input");
+  keep.type = "checkbox";
+  keepLab.appendChild(keep);
+  keepLab.appendChild(document.createTextNode(" Keep going"));
+  keepLab.title = "continue past a failed stage instead of halting the pipeline";
   const runBtn = h("button", "btn btn-run", "Run pipeline");
   const status = h("span", "status-line");
   const updateEnabled = () => {
@@ -144,13 +220,23 @@ function renderPipelinePanel(data) {
     const chosen = [...checks.entries()]
       .filter(([, cb]) => cb.checked)
       .map(([s]) => s);
+    const daysRaw = parseInt(daysInput.value, 10);
+    const days = Number.isInteger(daysRaw) && daysRaw >= 1 ? daysRaw : null;
+    const limitRaw = parseInt(limitInput.value, 10);
+    const limit = Number.isInteger(limitRaw) && limitRaw >= 1 ? limitRaw : null;
     runBtn.disabled = true;
     status.textContent = "starting job…";
     try {
       const res = await api("/api/jobs/run", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ steps: chosen, dry_run: dry.checked }),
+        body: JSON.stringify({
+          steps: chosen,
+          dry_run: dry.checked,
+          days,
+          limit,
+          keep_going: keep.checked,
+        }),
       });
       status.textContent = `job ${res.job_id} started${dry.checked ? " (dry run)" : ""} — live log open below`;
       hasRunning = true;
@@ -164,10 +250,84 @@ function renderPipelinePanel(data) {
     }
   });
   dry.addEventListener("change", updateEnabled);
+  keep.addEventListener("change", updateEnabled);
   controls.appendChild(runBtn);
   controls.appendChild(dryLab);
+  controls.appendChild(keepLab);
   controls.appendChild(status);
   panel.appendChild(controls);
+
+  const auditPanel = h("div", "audit-run");
+  auditPanel.appendChild(h("h2", "card-title", "Audit dataset"));
+  auditPanel.appendChild(h("div", "status-line",
+    "SAM + VLM reconciliation of collected samples — independent of the pipeline above"));
+  const auditOpts = h("div", "run-options");
+  const resumeLab = h("label", null);
+  const resume = document.createElement("input");
+  resume.type = "checkbox";
+  resume.checked = true;
+  resumeLab.appendChild(resume);
+  resumeLab.appendChild(document.createTextNode(" Resume"));
+  resumeLab.title = "skip samples with a valid cached KEEP/DROP decision";
+  auditOpts.appendChild(resumeLab);
+  const samOnlyLab = h("label", null);
+  const samOnly = document.createElement("input");
+  samOnly.type = "checkbox";
+  samOnlyLab.appendChild(samOnly);
+  samOnlyLab.appendChild(document.createTextNode(" SAM only"));
+  samOnlyLab.title = "run SAM only; do not call the VLM";
+  auditOpts.appendChild(samOnlyLab);
+  const auditLimitWrap = h("div", "option option-wide");
+  auditLimitWrap.appendChild(h("span", "option-label", "Max samples to audit"));
+  const auditLimit = document.createElement("input");
+  auditLimit.type = "number";
+  auditLimit.min = "1";
+  auditLimit.step = "1";
+  auditLimit.placeholder = "unlimited";
+  auditLimit.title = "process at most N new samples (empty = all)";
+  auditLimitWrap.appendChild(auditLimit);
+  auditLimitWrap.appendChild(h("span", "option-unit", "samples"));
+  auditOpts.appendChild(auditLimitWrap);
+  auditPanel.appendChild(auditOpts);
+  const auditControls = h("div", "buttons-row");
+  const auditBtn = h("button", "btn btn-run", "Run Audit");
+  const auditStatus = h("span", "status-line");
+  auditControls.appendChild(auditBtn);
+  auditControls.appendChild(auditStatus);
+  auditPanel.appendChild(auditControls);
+  auditBtn.addEventListener("click", async () => {
+    const limitRaw = parseInt(auditLimit.value, 10);
+    const limit = Number.isInteger(limitRaw) && limitRaw >= 1 ? limitRaw : null;
+    auditBtn.disabled = true;
+    auditStatus.textContent = "starting audit…";
+    try {
+      const res = await api("/api/jobs/audit", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          resume: resume.checked,
+          limit,
+          sam_only: samOnly.checked,
+        }),
+      });
+      const opts = [];
+      if (!resume.checked) opts.push("no resume");
+      if (limit !== null) opts.push(`max ${limit} samples`);
+      if (samOnly.checked) opts.push("SAM only");
+      auditStatus.textContent = `audit job ${res.job_id} started` +
+        (opts.length ? " (" + opts.join(", ") + ")" : "") + " — live log open below";
+      hasRunning = true;
+      renderBanner({ id: res.job_id, status: "running", type: "audit" });
+      openJobDrawer(res.job_id);
+      views.audit.stale = true;
+      views.overview.stale = true;
+      render("overview");
+    } catch (e) {
+      auditStatus.textContent = e.message;
+      auditBtn.disabled = hasRunning;
+    }
+  });
+  panel.appendChild(auditPanel);
   panel.appendChild(h("div", "status-line",
     "note: stages run in this server's process; stopping the server stops a running job"));
   return panel;
@@ -218,11 +378,16 @@ async function renderJobDrawer(jobId) {
     const meta = h("div", "drawer-meta");
     const fields = [
       ["id", job.id],
-      ["type", job.type],
+      ["kind", jobKindLabel(job.type)],
       ["started", fmtTs(job.started_at)],
       ["finished", job.finished_at ? fmtTs(job.finished_at) : "running"],
       ["duration", fmtDur(job.started_at, job.finished_at)],
     ];
+    if (job.days) fields.push(["lookback", job.days + " days"]);
+    if (job.limit) fields.push(["max items", job.limit]);
+    if (job.keep_going) fields.push(["keep going", "yes"]);
+    if (job.resume) fields.push(["resume", "yes"]);
+    if (job.sam_only) fields.push(["sam only", "yes"]);
     for (const [k, v] of fields) {
       meta.appendChild(h("div", "k", k));
       meta.appendChild(h("div", "v", v === null || v === undefined || v === "" ? "—" : String(v)));
@@ -470,16 +635,17 @@ async function renderOverview(sec) {
     `verified ${data.samples.verified} / unverified ${data.samples.unverified}`));
   cards.appendChild(countCard("Cameras", data.cameras.length, data.cameras.join(", ") || "none"));
   cards.appendChild(countCard("Disk free", fmtBytes(data.disk_free_bytes), "dataset root"));
-  cards.appendChild(countCard("VLM", data.vlm_enabled ? "enabled" : "disabled", "verification engine"));
+  cards.appendChild(countCard("VLM", data.vlm_enabled ? "enabled" : "disabled",
+    "labels samples in the Verify stage"));
   const quals = Object.keys(data.samples)
     .filter((k) => k.startsWith("quality_"))
     .filter((k) => data.samples[k] > 0)
-    .map((k) => `${k.slice(8)}=${data.samples[k]}`)
+    .map((k) => `${QUALITY_LABELS[k.slice(8)] || k.slice(8)}=${data.samples[k]}`)
     .join(", ");
-  cards.appendChild(countCard("Quality", quals || "none", "verdict counts"));
-  cards.appendChild(countCard("Auto-enable", data.auto_enable.length,
-    data.auto_enable.join(", ") || "none"));
-  cards.appendChild(countCard("Next build", data.next_build_version || "—", "dataset version"));
+  cards.appendChild(countCard("Quality verdicts", quals || "none", "per-verdict sample counts"));
+  cards.appendChild(countCard("Auto pipeline", data.auto_enable.length,
+    data.auto_enable.map((s) => (STEP_LABELS[s] || [s])[0]).join(", ") || "none"));
+  cards.appendChild(countCard("Next dataset", data.next_build_version || "—", "version the next build will emit"));
   sec.appendChild(cards);
 
   sec.appendChild(renderPipelinePanel(data));
@@ -493,7 +659,7 @@ async function renderOverview(sec) {
     const table = h("table");
     table.className = "jobs-table";
     table.innerHTML = `
-      <thead><tr><th>id</th><th>type</th><th>status</th><th>started</th>
+      <thead><tr><th>id</th><th>kind</th><th>status</th><th>started</th>
       <th>duration</th><th>error</th><th></th></tr></thead>
       <tbody></tbody>`;
     const tbody = table.querySelector("tbody");
@@ -501,7 +667,7 @@ async function renderOverview(sec) {
       const tr = h("tr");
       tr.innerHTML = `
         <td class="mono">${esc(j.id.slice(0, 8))}</td>
-        <td>${esc(j.type)}</td>
+        <td>${esc(jobKindLabel(j.type))}</td>
         <td>${pill(j.status, j.status)}</td>
         <td>${esc(fmtTs(j.started_at))}</td>
         <td>${esc(fmtDur(j.started_at, j.finished_at))}</td>
@@ -547,7 +713,7 @@ function drawChips(strip, steps, reports) {
       else if (rep.status === "failed") cls = "chip chip-fail";
       else cls = "chip chip-skip";
     }
-    const chip = h("span", cls, step);
+    const chip = h("span", cls, (STEP_LABELS[step] || [step])[0]);
     if (rep && rep.message) chip.title = rep.message;
     strip.appendChild(chip);
   }
@@ -563,8 +729,8 @@ async function renderBenchmark(sec) {
   }
 
   sec.appendChild(h("div", "status-line",
-    `golden ${data.golden} · baseline ${data.baseline} · ` +
-    `max latency ${num(data.max_latency_ms, 1)}ms · results updated ${fmtTs(data.results_updated_at) || "—"}`));
+    `golden dataset ${data.golden} · baseline ${data.baseline} · ` +
+    `max latency ${num(data.max_latency_ms, 1)} ms · results updated ${fmtTs(data.results_updated_at) || "—"}`));
 
   const btnRow = h("div", "buttons-row");
   const runBtn = h("button", "btn", "Re-benchmark + gate");
@@ -670,13 +836,12 @@ async function renderQuality(sec) {
   ]);
   sec.innerHTML = "";
   const cards = h("div", "cards");
-  cards.appendChild(countCard("Samples", data.total, `one-class boxes ${data.one_class_boxes}`));
-  cards.appendChild(countCard("Verified", data.verified, `problematic ${data.problematic}`));
-  cards.appendChild(countCard("Unverified", data.unverified, "awaiting review"));
-  cards.appendChild(countCard("Frigate-reviewed", data.reviewed, "human-confirmed in Frigate Review UI"));
-  cards.appendChild(countCard("Frigate-unreviewed", data.unreviewed, "not yet confirmed by a human"));
+  cards.appendChild(countCard("Samples", data.total, `with verified boxes: ${data.one_class_boxes}`));
+  cards.appendChild(countCard("Verified", data.verified, `bad or duplicate: ${data.problematic}`));
+  cards.appendChild(countCard("Unverified", data.unverified, "awaiting a verdict"));
   for (const q of QUALITIES) {
-    cards.appendChild(countCard(q, data.by_quality[q] ?? 0, "quality verdict"));
+    cards.appendChild(countCard(QUALITY_LABELS[q] || q, data.by_quality[q] ?? 0,
+      QUALITY_DESC[q] || "verdict count"));
   }
   sec.appendChild(cards);
 
@@ -701,10 +866,10 @@ async function renderQuality(sec) {
     sec.appendChild(bars);
   }
 
-  sec.appendChild(tableCaption("Review backlog"));
+  sec.appendChild(tableCaption("Verdict backlog"));
   const samples = backlog.samples || [];
   if (!samples.length) {
-    sec.appendChild(h("div", "placeholder", "no unverified samples to review"));
+    sec.appendChild(h("div", "placeholder", "no unverified samples awaiting a verdict"));
   } else {
     const table = h("table");
     table.innerHTML = `
@@ -713,7 +878,7 @@ async function renderQuality(sec) {
     const tbody = table.querySelector("tbody");
     samples.forEach((s, i) => {
       const tr = h("tr");
-      const link = h("a", null, "review");
+      const link = h("a", null, "verdict");
       link.addEventListener("click", () => openLightbox(samples, i));
       tr.appendChild(h("td", "mono", s.id.slice(0, 12)));
       tr.appendChild(h("td", null, s.camera || "—"));
@@ -754,7 +919,7 @@ async function renderAudit(sec) {
     `audit root ${esc(data.root)} · pipeline v${num(data.pipeline_version, 0)} · updated ${updated}`));
   if (!data.exists || !s.total) {
     sec.appendChild(h("div", "placeholder",
-      "no audit output yet — run `.venv/bin/frigate-learn audit run` to seed SAM + VLM reconciliation decisions"));
+      "no audit output yet — run Audit from the Run pipeline panel on Overview, or `.venv/bin/frigate-learn audit run` to seed SAM + VLM reconciliation decisions"));
     return;
   }
 
@@ -762,7 +927,7 @@ async function renderAudit(sec) {
   cards.appendChild(countCard("Samples", s.total, `processed ${num(s.processed, 0)}`));
   cards.appendChild(countCard("SAM ok", s.sam_ok, `failures ${num(s.sam_fail, 0)}`));
   cards.appendChild(countCard("VLM verdicts", s.vlm_calls, `failed ${num(s.vlm_fail, 0)} · pending ${num(s.vlm_transport, 0)}`));
-  cards.appendChild(countCard("VLM+SAM agree", s.agreements, `disagreements ${num(s.disagreements, 0)}`));
+  cards.appendChild(countCard("SAM + VLM agree", s.agreements, `disagreements ${num(s.disagreements, 0)}`));
   cards.appendChild(countCard("Accepted", s.accepted, "kept for training"));
   cards.appendChild(countCard("Dropped", s.dropped, "rejected by a stage"));
   cards.appendChild(countCard("Pending", s.pending, "VLM transport — retry with --resume"));
@@ -780,13 +945,14 @@ async function renderAudit(sec) {
   sec.appendChild(renderAuditClassBars(s.by_class || {}));
 
   const bar = h("div", "filter-bar");
-  const statusSel = filterSelect("status", ["KEEP", "DROP", "PENDING"], auditState.status,
-    (v) => { auditState.status = v; auditState.offset = 0; auditState.detailId = null; render("audit"); });
-  const labelSel = filterSelect("label", auditState.labels.slice().sort(), auditState.label,
+  const statusSel = filterSelect("Verdict", ["KEEP", "DROP", "PENDING"], auditState.status,
+    (v) => { auditState.status = v; auditState.offset = 0; auditState.detailId = null; render("audit"); },
+    { KEEP: "Accepted", DROP: "Dropped", PENDING: "Pending" });
+  const labelSel = filterSelect("Label", auditState.labels.slice().sort(), auditState.label,
     (v) => { auditState.label = v; auditState.offset = 0; auditState.detailId = null; render("audit"); });
   bar.appendChild(statusSel);
   bar.appendChild(labelSel);
-  bar.appendChild(h("span", "status-line", `${data.total} sample(s)`));
+  bar.appendChild(h("span", "status-line", `${data.total} samples`));
   const prev = h("button", "btn", "← prev");
   prev.disabled = auditState.offset <= 0;
   prev.addEventListener("click", () => {
@@ -884,7 +1050,7 @@ function auditFailureBanner(s) {
   }
   if (s.vlm_transport > 0 && s.pending > 0) {
     return h("div", "audit-banner",
-      `${num(s.pending, 0)} sample(s) are PENDING (VLM transport failure). Retry them with ` +
+      `${num(s.pending, 0)} samples are PENDING (VLM transport failure). Retry them with ` +
       `.venv/bin/frigate-learn audit run --resume once the audit VLM endpoint is reachable`);
   }
   return null;
@@ -1164,12 +1330,12 @@ async function renderAuditDetail(sec, table, sampleId) {
     }
     const agreeOk = !failing.includes("class_mismatch");
     const agreeRow = h("div", "audit-check " + (agreeOk ? "check-ok" : "check-fail"));
-    agreeRow.appendChild(h("span", null, "SAM & VLM class agree (independent)"));
+    agreeRow.appendChild(h("span", null, "SAM + VLM class agree (independent)"));
     agreeRow.appendChild(pillNode(agreeOk ? "✓ pass" : "✗ fail", agreeOk ? "pass" : "fail"));
     checkBox.appendChild(agreeRow);
   }
   const decisionBox = renderKvSection("Decision", [
-    ["status", d.status || "—"],
+    ["verdict", d.status || "—"],
     ["reason", d.reason || "none (all stages agreed)"],
     ["training label", d.training_label || "—"],
     ["bbox source", d.bbox_source || "—"],
@@ -1358,7 +1524,7 @@ async function renderTrainingDetail(sec, run) {
 }
 
 const triageState = {
-  quality: "", status: "", camera: "", verified: false, reviewed: "",
+  quality: "", status: "", camera: "", verified: false,
   samples: [], statuses: new Set(), cameras: [], seeded: false, list: [], idx: 0,
 };
 
@@ -1376,11 +1542,11 @@ async function renderTriage(sec) {
   }
   sec.innerHTML = "";
   const bar = h("div", "filter-bar");
-  bar.appendChild(filterSelect("quality", QUALITIES, triageState.quality,
-    (v) => { triageState.quality = v; loadTriageGrid(); }));
-  bar.appendChild(filterSelect("status", [...triageState.statuses].sort(), triageState.status,
+  bar.appendChild(filterSelect("Verdict", QUALITIES, triageState.quality,
+    (v) => { triageState.quality = v; loadTriageGrid(); }, QUALITY_LABELS));
+  bar.appendChild(filterSelect("Status", [...triageState.statuses].sort(), triageState.status,
     (v) => { triageState.status = v; loadTriageGrid(); }));
-  bar.appendChild(filterSelect("camera", triageState.cameras.slice().sort(), triageState.camera,
+  bar.appendChild(filterSelect("Camera", triageState.cameras.slice().sort(), triageState.camera,
     (v) => { triageState.camera = v; loadTriageGrid(); }));
   const vbox = h("label", null);
   const vcheck = document.createElement("input");
@@ -1393,23 +1559,22 @@ async function renderTriage(sec) {
   vbox.appendChild(vcheck);
   vbox.appendChild(document.createTextNode(" verified only"));
   bar.appendChild(vbox);
-  bar.appendChild(filterSelect("reviewed", ["reviewed", "unreviewed"], triageState.reviewed,
-    (v) => { triageState.reviewed = v; loadTriageGrid(); }));
   sec.appendChild(bar);
-
+  sec.appendChild(h("div", "status-line",
+    "click a thumbnail to open the lightbox — set a verdict, or navigate with ←/→ and close with Esc"));
   triageState.grid = h("div", "thumb-grid");
   sec.appendChild(triageState.grid);
   await loadTriageGrid();
 }
 
-function filterSelect(name, options, current, onChange) {
-  const label = h("span", null, name);
+function filterSelect(label, options, current, onChange, display) {
+  const lab = h("span", null, label);
   const select = h("select");
-  const empty = h("option", null, "all " + name + "s");
+  const empty = h("option", null, "All");
   empty.value = "";
   select.appendChild(empty);
   for (const o of options) {
-    const opt = h("option", null, o);
+    const opt = h("option", null, display ? (display[o] || o) : o);
     opt.value = o;
     select.appendChild(opt);
   }
@@ -1417,7 +1582,7 @@ function filterSelect(name, options, current, onChange) {
   select.addEventListener("change", () => onChange(select.value));
   const wrap = h("div", "filter-bar");
   wrap.style.margin = "0";
-  wrap.appendChild(label);
+  wrap.appendChild(lab);
   wrap.appendChild(select);
   return wrap;
 }
@@ -1428,8 +1593,6 @@ function samplesQuery() {
   if (triageState.status) p.set("status", triageState.status);
   if (triageState.camera) p.set("camera", triageState.camera);
   if (triageState.verified) p.set("verified", 1);
-  if (triageState.reviewed === "reviewed") p.set("reviewed", 1);
-  if (triageState.reviewed === "unreviewed") p.set("reviewed", 0);
   p.set("limit", 200);
   return "/api/samples?" + p.toString();
 }
@@ -1443,7 +1606,7 @@ async function loadTriageGrid() {
     triageState.samples = data.samples || [];
     triageState.grid.innerHTML = "";
     triageState.grid.appendChild(h("div", "status-line",
-      `${data.total} sample(s), showing ${triageState.samples.length}`));
+      `${data.total} samples, showing ${triageState.samples.length}`));
     if (!triageState.samples.length) {
       triageState.grid.appendChild(h("div", "placeholder", "no samples match"));
       return;
@@ -1459,14 +1622,18 @@ async function loadTriageGrid() {
       } else {
         thumb.appendChild(h("div", "noimg", "no image"));
       }
-      if (s.verified) thumb.appendChild(h("div", "badge-verify", "✓"));
-      if (s.reviewed === 1) thumb.appendChild(h("div", "badge-review", "R"));
+      if (s.verified) {
+        const b = h("div", "badge-verify", "✓");
+        b.title = "verified";
+        thumb.appendChild(b);
+      }
       const meta = h("div", "meta");
       meta.appendChild(document.createTextNode(
         `${s.camera || "—"} · ${s.label || "—"} · ${num(s.score, 2)} · `));
       meta.appendChild(document.createTextNode(fmtTs(s.timestamp)));
       meta.appendChild(document.createTextNode(" "));
-      meta.appendChild(pillNode(s.quality || "unset", s.quality));
+      meta.appendChild(pillNode(s.quality || "unset", s.quality,
+        s.quality ? QUALITY_DESC[s.quality] : "no verdict yet"));
       thumb.appendChild(meta);
       thumb.addEventListener("click", () => openLightbox(triageState.samples, i));
       triageState.grid.appendChild(thumb);
@@ -1512,13 +1679,13 @@ async function renderLightbox() {
   meta.appendChild(h("span", null, item.camera || "—"));
   meta.appendChild(h("span", null, item.label || "—"));
   meta.appendChild(h("span", null, fmtTs(item.timestamp)));
-  meta.appendChild(pillNode(item.quality || "unset", item.quality));
-  const revTxt = item.reviewed === 1 ? "reviewed" : item.reviewed === 0 ? "unreviewed" : "";
-  if (revTxt) meta.appendChild(pillNode(revTxt, item.reviewed === 1 ? "rev" : "unrev"));
+  meta.appendChild(pillNode(item.quality || "unset", item.quality,
+    item.quality ? QUALITY_DESC[item.quality] : "no verdict yet"));
 
   const qbar = h("div", "lightbox-qual");
   for (const q of QUALITIES) {
-    const btn = h("button", null, q);
+    const btn = h("button", null, QUALITY_LABELS[q] || q);
+    btn.title = QUALITY_DESC[q] || q;
     btn.dataset.quality = q;
     btn.dataset.action = "quality";
     btn.addEventListener("click", async () => {
@@ -1568,7 +1735,8 @@ async function renderLightbox() {
     const first = panel.querySelector(".lightbox-meta .pill");
     if (first) first.remove();
     panel.querySelector(".lightbox-meta").appendChild(
-      pillNode(detail.sample.quality || "unset", detail.sample.quality));
+      pillNode(detail.sample.quality || "unset", detail.sample.quality,
+        detail.sample.quality ? QUALITY_DESC[detail.sample.quality] : "no verdict yet"));
   } catch (e) {
     stage.appendChild(h("div", "placeholder lb-note", e.message));
   }
@@ -1669,7 +1837,7 @@ function renderBanner(runningJob) {
   const body = h("span", "banner-body");
   body.appendChild(h("span", "spinner"));
   body.appendChild(h("span", null,
-    `job ${runningJob.id.slice(0, 8)} · pipeline running — click for live log`));
+    `job ${runningJob.id.slice(0, 8)} · ${jobKindLabel(runningJob.type).toLowerCase()} running — click for live log`));
   banner.appendChild(body);
   banner.onclick = () => openJobDrawer(runningJob.id);
   document.documentElement.style.setProperty("--banner-h", banner.offsetHeight + "px");

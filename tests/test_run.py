@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import os
+from datetime import UTC, datetime
 
 from PIL import Image
+from sqlalchemy import text
 
 from frigate_learn.collection.collector import CollectSummary
-from frigate_learn.collection.review_sync import ReviewSyncSummary
 from frigate_learn.models import Annotation, Sample, utcnow
 from frigate_learn.run import PIPELINE, next_build_version, run_pipeline
 
@@ -19,7 +20,7 @@ class FakeCollector:
         self.client = type("C", (), {"close": lambda self: None})()
 
     def collect(self, from_ts, to_ts=None, cameras=None, labels=None, severity=None,
-                limit=None, concurrency=None, progress=None):
+                limit=None, concurrency=None, progress=None, record_job=False):
         if progress:
             progress("Reviews found: 1")
         return CollectSummary(
@@ -92,6 +93,33 @@ def test_run_until_truncates_steps(config, db, monkeypatch):
     assert names == ["collect", "build"]
 
 
+def test_run_forwards_days_and_limit_to_collector(config, db, monkeypatch):
+    captured = {}
+
+    class RecordingCollector:
+        def __init__(self, *args, **kwargs):
+            self.client = type("C", (), {"close": lambda self: None})()
+
+        def collect(self, from_ts, to_ts=None, cameras=None, labels=None,
+                    severity=None, limit=None, concurrency=None, progress=None,
+                    record_job=False):
+            captured["from_ts"] = from_ts
+            captured["limit"] = limit
+            return CollectSummary(
+                reviews_found=1, reviews_selected=1, events_found=1, events_new=1,
+                new_samples=1, duplicate_samples=0, failures=0, new_annotations=1,
+                range_from=from_ts, range_to=to_ts, duration_seconds=0.1,
+                job_id="job1",
+            )
+
+    monkeypatch.setattr("frigate_learn.collection.collector.Collector", RecordingCollector)
+    reports = run_pipeline(config, db, steps=["collect"], dry_run=True, days=3, limit=25)
+    assert reports[0].status == "executed"
+    assert captured["limit"] == 25
+    span_days = (datetime.now(UTC).timestamp() - captured["from_ts"]) / 86400.0
+    assert 2.9 <= span_days <= 3.1
+
+
 def _make_existing_version(config, version="v007"):
     datasets = config.datasets_dir() / version
     datasets.mkdir(parents=True, exist_ok=True)
@@ -127,32 +155,19 @@ def test_run_keep_going_continues_past_failure(config, db, tmp_path, monkeypatch
 
 def test_pipeline_steps_registry_is_ordered():
     assert PIPELINE == [
-        "collect", "review-sync", "verify", "build", "train", "benchmark", "gate", "deploy"
+        "collect", "verify", "build", "train", "benchmark", "gate", "deploy"
     ]
 
 
-class FakeReviewSyncer:
-    def __init__(self, config, db):
-        self.client = type("C", (), {"close": lambda self: None})()
-
-    def sync(self, from_ts, to_ts=None, cameras=None, severity=None,
-             auto_useful=None, progress=None):
-        return ReviewSyncSummary(
-            reviews_found=2, reviews_seen=2, samples_matched=1,
-            flags_changed=1, auto_useful=1, job_id="rev1", duration_seconds=0.05,
-        )
-
-
-def test_run_review_sync_step_executes(config, db, monkeypatch):
-    monkeypatch.setattr(
-        "frigate_learn.collection.review_sync.ReviewSyncer", FakeReviewSyncer
+def test_pipeline_run_records_no_per_stage_jobs(config, db, monkeypatch):
+    monkeypatch.setattr("frigate_learn.collection.collector.Collector", FakeCollector)
+    reports = run_pipeline(
+        config, db, steps=["collect", "verify"], dry_run=True
     )
-    reports = run_pipeline(config, db, steps=["review-sync"], dry_run=True)
-    assert len(reports) == 1
-    report = reports[0]
-    assert report.name == "review-sync"
-    assert report.status == "executed"
-    assert "auto_useful=1" in report.message
+    assert {r.name for r in reports} == {"collect", "verify"}
+    with db.session() as s:
+        count = s.execute(text("SELECT COUNT(*) FROM jobs")).scalar()
+    assert count == 0
 
 
 def test_latest_trained_run_none_when_training_dir_missing(config, tmp_path):

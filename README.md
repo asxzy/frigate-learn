@@ -68,10 +68,6 @@ cp config.example.yaml config.yaml
 # collect the last 7 days of review/event data
 .venv/bin/frigate-learn --config config.yaml collect --from "7 days ago"
 
-# pull Frigate Review state into the pool (human confirmation channel:
-# operators mark events reviewed/unreviewed in Frigate's own Review UI)
-.venv/bin/frigate-learn review-sync --days 7
-
 # camera/time-scoped collection
 .venv/bin/frigate-learn collect --camera driveway --from "2026-09-01" --to "2026-09-08"
 
@@ -145,25 +141,25 @@ views:
   pipeline-stage strip.
 - **Benchmark** — candidate-vs-baseline metrics, a latency vs mAP50 scatter,
   the deployments ledger, and the **Re-benchmark + gate** button.
-- **Quality** — verdict totals, Frigate-review counts (human-confirmed vs
-  not), verified boxes per class, and the review backlog of unverified
-  samples.
+- **Quality** — verdict totals, verified boxes per class, and the verdict
+  backlog of unverified samples.
 - **Audit** — SAM + VLM reconciliation view: the decision funnel
   (candidates → SAM ok → VLM verdict → KEEP), per-class accept/drop/pending
-  bars, the per-sample verdict table (filterable by status/class), and a
+  bars, the per-sample verdict table (filterable by verdict/class), and a
   detail panel with the reconciliation image the VLM judged, SAM hypothesis,
   geometry metrics, and the six VLM booleans with failing conditions.
 - **Datasets** — dataset version table (train/val splits, verified counts) and
   golden-dataset status.
 - **Training** — pick a training run: best/latest mAP50, weights presence, and
   mAP50/recall epoch curves.
-- **Triage** — filter the sample grid (quality/status/camera/verified/Frigate
-  reviewed); click a thumbnail for a lightbox with detection + Frigate bbox
-  overlays and the review-state pill.
+- **Samples** — filter the sample grid (quality/status/camera/verified);
+  click a thumbnail for a lightbox with detection + Frigate bbox overlays.
 
-There are two POST actions: the **Re-benchmark + gate** button runs the
-`benchmark` and `gate` stages, and the Triage lightbox sets a sample's quality
-verdict (`useful` / `bad` / `duplicate` / `ignore`).
+There are three POST actions: the **Re-benchmark + gate** button runs the
+`benchmark` and `gate` stages, the **Run Audit** action in the Overview
+pipeline panel runs the SAM + VLM reconciliation pipeline, and the Samples
+lightbox sets a sample's quality verdict (`useful` / `bad` / `duplicate` /
+`ignore`).
 
 Constraints, plainly:
 
@@ -237,16 +233,8 @@ the hand-off for `train <model> <version> --real` + `deploy <model> <best.pt>
 `frigate-learn run` executes the configured stages in order:
 
 ```
-collect → review-sync → verify → build → train → benchmark → gate → deploy
+collect → verify → build → train → benchmark → gate → deploy
 ```
-
-`review-sync` is the human-in-Frigate channel: operators confirm/deny events
-in Frigate's own Review UI, and the stage mirrors `has_been_reviewed` onto the
-local samples (``samples.frigate_reviewed``), auto-triaging reviewed segments
-to `useful` when `collection.review_auto_useful` is on (default). It is a
-confirmation signal, never a source of boxes — the VLM verifier still owns the
-box labels. Frigate stores the flag per user, so the token account must be the
-one that marks reviews in the Frigate UI.
 
 Each stage reports `executed | skipped | failed` (a skipped stage explains
 why — missing VLM config, ML extra not installed, no new dataset, golden
@@ -277,7 +265,6 @@ src/frigate_learn/
 │   └── motion.py          # motion-activity model + parsing (P9 consumer)
 ├── collection/
 │   ├── collector.py       # review → event → snapshot → SQLite pipeline
-│   ├── review_sync.py     # human-confirmation channel: Frigate review state → samples
 │   ├── sampling.py        # P3: temporal sampling within an event
 │   ├── dedup.py           # P3: SHA-256 + dHash near-duplicate suppression
 │   ├── discover.py        # P9: motion windows without collected evidence
@@ -325,12 +312,10 @@ src/frigate_learn/
 
 - **Frigate specifics stay inside `frigate/`.** Nothing else in the codebase
   knows the URL layout or response shapes.
-- **The collector owns its state.** Frigate's `has_been_reviewed` is never
-  used for progress, dedup, or review thumbnails — the SQLite pool owns that.
-  The one exception is the opt-in `review-sync` stage: it reads the flag as an
-  *advisory human label input* (mirrored into `samples.frigate_reviewed`,
-  `auto_useful` policy configurable) and never as pipeline progress state.
-- **One review ≠ one object.** Review items are expanded to their underlying
+- **The collector owns its state.** Dedup and progress live in the SQLite pool
+  (`samples.event_id` unique key + image hashes); Frigate's review flags are
+  not consulted.
+- **One segment ≠ one object.** Review items are expanded to their underlying
   event IDs; each event becomes (at most) one sample.
 - **Training images are clean snapshots.** The annotated snapshot is only
   optionally stored for debugging, never used for training.
@@ -352,9 +337,6 @@ implements that; everything above the adapter is unaffected. Other specifics:
   `data.objects`). The parser also accepts the older dict-shaped form.
 - List endpoints return ISO-8601 timestamps, single-item endpoints return unix
   floats; `parse_ts()` handles both.
-- `has_been_reviewed` on `/api/review` is **per-user** (joined on the
-  authenticated username), so the token used by this pipeline must match the
-  account that marks reviews in the Frigate UI.
 
 ## Tests
 

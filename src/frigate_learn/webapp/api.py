@@ -14,6 +14,15 @@ from .serving import resolve_image, resolve_thumb
 class JobRunRequest(BaseModel):
     steps: list[str]
     dry_run: bool = Field(default=False, strict=True)
+    days: int | None = Field(default=None, ge=1)
+    limit: int | None = Field(default=None, ge=1)
+    keep_going: bool = Field(default=False, strict=True)
+
+
+class AuditRunRequest(BaseModel):
+    resume: bool = Field(default=True, strict=True)
+    limit: int | None = Field(default=None, ge=1)
+    sam_only: bool = Field(default=False, strict=True)
 
 
 class QualityRequest(BaseModel):
@@ -126,13 +135,12 @@ def register_routes(app: FastAPI) -> None:
         camera: str | None = None,
         label: str | None = None,
         verified: int | None = None,
-        reviewed: int | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> dict:
         return queries.samples(
             db, status=status, quality=quality, camera=camera, label=label,
-            verified=verified, reviewed=reviewed, limit=limit, offset=offset,
+            verified=verified, limit=limit, offset=offset,
         )
 
     @app.get("/api/samples/{sample_id}", response_model=None)
@@ -156,7 +164,29 @@ def register_routes(app: FastAPI) -> None:
     @app.post("/api/jobs/run")
     async def jobs_run(body: JobRunRequest):
         try:
-            job_id = jobs.start(body.steps, dry_run=body.dry_run)
+            job_id = jobs.start(
+                body.steps,
+                dry_run=body.dry_run,
+                days=body.days,
+                limit=body.limit,
+                keep_going=body.keep_going,
+            )
+        except JobRunningError:
+            return JSONResponse(
+                {"detail": "a pipeline job is already running"}, status_code=409,
+            )
+        except ValueError as exc:
+            return JSONResponse({"detail": str(exc)}, status_code=422)
+        return JSONResponse({"job_id": job_id}, status_code=202)
+
+    @app.post("/api/jobs/audit")
+    async def jobs_audit(body: AuditRunRequest):
+        try:
+            job_id = jobs.start_audit(
+                resume=body.resume,
+                limit=body.limit,
+                sam_only=body.sam_only,
+            )
         except JobRunningError:
             return JSONResponse(
                 {"detail": "a pipeline job is already running"}, status_code=409,

@@ -61,10 +61,6 @@ class CollectionSettings:
     # parity.
     region_crop: bool = False
     region_crop_height: int | None = None
-    # review-sync policy: when a sample's Frigate review segment is marked
-    # reviewed (human confirmed it in Frigate's Review UI) and the sample has
-    # no explicit local verdict, auto-triage it to useful.
-    review_auto_useful: bool = True
 
 
 @dataclass
@@ -383,9 +379,6 @@ def build_config(raw: dict[str, Any], base_dir: Path) -> AppConfig:
     cfg.collection.region_crop = bool(_pop(col, "region_crop", cfg.collection.region_crop))
     cfg.collection.region_crop_height = _as_optional_int(
         _pop(col, "region_crop_height", None)
-    )
-    cfg.collection.review_auto_useful = bool(
-        _pop(col, "review_auto_useful", cfg.collection.review_auto_useful)
     )
 
     au = _section(raw, "audit")

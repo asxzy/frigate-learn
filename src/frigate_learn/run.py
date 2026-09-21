@@ -2,7 +2,7 @@
 
 ``frigate-learn run`` executes the configured stages in order:
 
-    collect → review-sync → verify → build → train → benchmark → gate → deploy
+    collect → verify → build → train → benchmark → gate → deploy
 
 Each stage registers a skip condition (missing data, missing ML deps, no new
 dataset, etc.) and reports ``executed | skipped | failed`` so a nightly cron can
@@ -13,7 +13,7 @@ flow through a small context dict (e.g. the dataset version built by ``build``).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .config import AppConfig
@@ -22,7 +22,6 @@ from .logutil import debug, error, info
 
 PIPELINE = [
     "collect",
-    "review-sync",
     "verify",
     "build",
     "train",
@@ -81,6 +80,7 @@ def run_pipeline(
     dry_run: bool = False,
     keep_going: bool = False,
     days: int | None = None,
+    limit: int | None = None,
 ) -> list[StepReport]:
     db.migrate()
     ordered = steps or _default_steps(config)
@@ -95,8 +95,7 @@ def run_pipeline(
     reports: list[StepReport] = []
 
     handlers = {
-        "collect": lambda: _step_collect(config, db, days, ctx),
-        "review-sync": lambda: _step_review_sync(config, db, ctx),
+        "collect": lambda: _step_collect(config, db, days, limit, ctx),
         "verify": lambda: _step_verify(config, db, ctx),
         "build": lambda: _step_build(config, db, ctx),
         "train": lambda: _step_train(config, db, ctx),
@@ -107,6 +106,7 @@ def run_pipeline(
 
     for name in ordered:
         try:
+            info("pipeline step start", step=name)
             report = handlers[name]()
         except Exception as exc:
             error("step failed", step=name, error=str(exc))
@@ -123,13 +123,18 @@ def run_pipeline(
 # --- stage implementations -------------------------------------------------
 
 
-def _step_collect(config: AppConfig, db: Database, days: int | None, ctx: dict) -> StepReport:
+def _step_collect(
+    config: AppConfig, db: Database, days: int | None, limit: int | None, ctx: dict
+) -> StepReport:
     from .collection.collector import Collector
 
     now = datetime.now(timezone.utc)
     from_ts = now - timedelta(days=days or config.collection.default_days)
     collector = Collector(config, db)
-    summary = collector.collect(from_ts=from_ts.timestamp(), to_ts=now.timestamp())
+    summary = collector.collect(
+        from_ts=from_ts.timestamp(), to_ts=now.timestamp(), limit=limit,
+        record_job=False,
+    )
     ctx["collect"] = summary
     return StepReport(
         name="collect",
@@ -140,30 +145,13 @@ def _step_collect(config: AppConfig, db: Database, days: int | None, ctx: dict) 
     )
 
 
-def _step_review_sync(config: AppConfig, db: Database, ctx: dict) -> StepReport:
-    from .collection.review_sync import ReviewSyncer
-
-    now = datetime.now(UTC)
-    from_ts = now - timedelta(days=config.collection.default_days)
-    syncer = ReviewSyncer(config, db)
-    summary = syncer.sync(from_ts=from_ts.timestamp(), to_ts=now.timestamp())
-    ctx["review_sync"] = summary
-    return StepReport(
-        name="review-sync",
-        status="failed" if summary.error else "executed",
-        message=f"seen={summary.reviews_seen} matched={summary.samples_matched} "
-        f"changed={summary.flags_changed} auto_useful={summary.auto_useful} "
-        f"in {summary.duration_seconds:.1f}s",
-    )
-
-
 def _step_verify(config: AppConfig, db: Database, ctx: dict) -> StepReport:
     if not config.vlm.enabled:
         return StepReport(name="verify", status="skipped", message="vlm.enabled=false")
     from .annotation.verifier import Verifier
 
     verifier = Verifier(config, db)
-    summary = verifier.verify()
+    summary = verifier.verify(record_job=False)
     ctx["verify"] = summary
     message = (
         f"annotated={summary.annotated} failed={summary.failed} "

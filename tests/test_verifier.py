@@ -8,7 +8,7 @@ from PIL import Image
 
 from frigate_learn.annotation.verifier import Verifier
 from frigate_learn.annotation.schema import VLMObject, VLMValidationError
-from frigate_learn.models import Annotation, Sample, utcnow
+from frigate_learn.models import Annotation, Job, Sample, utcnow
 
 
 class FakeProvider:
@@ -102,10 +102,13 @@ def test_verify_annotates_unverified_samples(config, db, tmp_path):
     with db.session() as s:
         sample = s.get(Sample, "s1")
         ann = s.query(Annotation).filter(Annotation.sample_id == "s1").one()
+        job = s.query(Job).filter(Job.id == summary.job_id).one()
     assert sample.verified == 1
     assert ann.source == "vlm"
     assert ann.verified == 1
     assert ann.confidence == 0.91
+    assert job.type == "verify"
+    assert job.status == "finished"
 
 
 def test_verify_limit_applies_after_order(config, db, tmp_path):
@@ -269,3 +272,17 @@ def test_verify_label_filter_routes_through_annotations(config, db, tmp_path):
     assert by_car.processed == 1
     by_truck = Verifier(config, db, provider=provider).verify(labels=["truck"])
     assert by_truck.processed == 0
+
+
+def test_verify_record_job_false_records_no_job(config, db, tmp_path):
+    _config_with_vlm(config)
+    img = _make_image(tmp_path, "a.jpg")
+    _sample_record(db, "s1", "front", "person")
+    with db.session() as s:
+        s.get(Sample, "s1").image_path = str(img)
+        s.commit()
+
+    provider = FakeProvider([[]])
+    Verifier(config, db, provider=provider).verify(record_job=False)
+    with db.session() as s:
+        assert s.query(Job).count() == 0
