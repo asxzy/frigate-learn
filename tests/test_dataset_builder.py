@@ -262,6 +262,39 @@ def test_builder_keeps_overlapping_different_labels(config, db, tmp_path):
     assert {line.split()[0] for line in rows} == {"0", "2"}
 
 
+def test_builder_emits_two_same_label_boxes(config, db, tmp_path):
+    _seed_multi_box(
+        config, db,
+        boxes=[
+            ("person", 0.1, 0.1, 0.4, 0.8),
+            ("person", 0.55, 0.1, 0.9, 0.8),
+        ],
+    )
+    summary = DatasetBuilder(config, db).build("v001")
+    assert summary.images_written == 1
+    rows = _read_emitted_labels(config)
+    assert len(rows) == 2
+    assert {line.split()[0] for line in rows} == {"0"}
+    target = config.datasets_dir() / "v001"
+    records = list(iter_manifest(target / "manifest.jsonl"))
+    assert records[0]["labels"] == ["person", "person"]
+
+
+def test_builder_unverified_two_same_label_boxes(config, db, tmp_path):
+    _seed_multi_box(
+        config, db,
+        boxes=[
+            ("person", 0.1, 0.1, 0.4, 0.8),
+            ("person", 0.55, 0.1, 0.9, 0.8),
+        ],
+    )
+    summary = DatasetBuilder(config, db).build("v001", verified_only=False)
+    assert summary.images_written == 1
+    rows = _read_emitted_labels(config)
+    assert len(rows) == 2
+    assert {line.split()[0] for line in rows} == {"0"}
+
+
 def test_builder_cap_counts_boxes_not_samples(config, db, tmp_path):
     _seed_multi_box(config, db, sample_id="s1", boxes=[
         ("person", 0.1, 0.1, 0.5, 0.8),

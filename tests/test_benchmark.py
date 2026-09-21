@@ -44,6 +44,23 @@ def _build_multi_gt_golden(tmp_path):
     return ds
 
 
+def _build_two_person_golden(tmp_path):
+    src = tmp_path / "src.jpg"
+    src.write_bytes(b"\xff\xd8\xff\xe0fakejpeg")
+    ds = GoldenDataset.create(tmp_path / "golden", ["person"])
+    ds.add_image(
+        "s1",
+        src,
+        [
+            YoloLine(0, 0.25, 0.5, 0.2, 0.2),   # person left
+            YoloLine(0, 0.75, 0.5, 0.2, 0.2),   # person right
+        ],
+        camera="front",
+        timestamp=1.0,
+    )
+    return ds
+
+
 def _examples(ds):
     examples = golden_to_examples(ds, ["person", "car"])
     assert len(examples) == 1
@@ -86,3 +103,27 @@ def test_model_predicting_only_one_box_not_full_recall(tmp_path):
     assert metrics.false_negatives == 1
     assert metrics.recall == 0.5
     assert metrics.map50 < 1.0
+
+
+def test_two_same_label_ground_truths_scored_independently(tmp_path):
+    examples = _examples(_build_two_person_golden(tmp_path))
+    both = FakeBackend([
+        Prediction("person", (0.15, 0.4, 0.35, 0.6), 0.9),
+        Prediction("person", (0.65, 0.4, 0.85, 0.6), 0.85),
+    ])
+    full = evaluate_backend(
+        both, examples, config=BenchmarkConfig(classes=["person"])
+    )
+    assert full.true_positives == 2
+    assert full.false_negatives == 0
+    assert full.recall == 1.0
+
+    one = FakeBackend([
+        Prediction("person", (0.15, 0.4, 0.35, 0.6), 0.9),
+    ])
+    partial = evaluate_backend(
+        one, examples, config=BenchmarkConfig(classes=["person"])
+    )
+    assert partial.true_positives == 1
+    assert partial.false_negatives == 1
+    assert partial.recall == 0.5
