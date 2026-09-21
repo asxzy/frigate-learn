@@ -257,19 +257,25 @@ class ManifestDatasetAdapter(DatasetAdapter):
 
 
 class FrigateDatabaseAdapter(DatasetAdapter):
-    """Reads the frigate-learn SQLite dataset (samples table + images).
+    """Reads the frigate-learn SQLite dataset (samples + annotations + images).
 
     Convention (this repo):
 
     * images live under ``<data>/images/<YYYYMMDD>/<camera>/<id>.jpg``
-    * ``frigate_x1..y2`` hold the Frigate event box as **normalized xyxy**
-      relative to the original frame (Frigate 0.18 events are normalized
-      ``[x, y, w, h]``; the collectors normalize to ``xyxy``).
+    * annotations rows are the authoritative object store: one row per object
+      in a frame, with normalized ``xyxy`` boxes (Frigate 0.18 event boxes are
+      normalized ``[x, y, w, h]``; the collectors normalize to ``xyxy``).
     * with the default full-frame collection the stored image *is* the frame,
       so normalized xyxy maps straight onto image pixels.
     * the DB does **not** record crop origins; if the dataset was collected
       with ``collection.region_crop`` you must pass ``assume_crop=True``, which
       interprets the stored box as normalized relative to the stored crop.
+
+    Iteration is per annotation (``source`` filter, default ``frigate``), so a
+    frame with several objects yields several :class:`FrigateObject` items with
+    distinct ``sample_id`` (the annotation id) and the original sample id kept
+    in ``extra["sample_id"]``. Databases without an ``annotations`` table
+    (legacy layouts) fall back to the samples columns.
     """
 
     def __init__(
@@ -280,6 +286,7 @@ class FrigateDatabaseAdapter(DatasetAdapter):
         assume_crop: bool = False,
         statuses: Sequence[str] = (),
         quality: Sequence[str] = (),
+        source: str = "frigate",
     ) -> None:
         from sqlalchemy import bindparam, create_engine, text
 
@@ -291,10 +298,12 @@ class FrigateDatabaseAdapter(DatasetAdapter):
         self._text = text
         self.images_root = Path(images_root) if images_root else None
         self.assume_crop = assume_crop
+        self.source = source
         self.statuses = list(statuses)
         self.quality = list(quality)
         self.skip_reasons: dict[str, int] = {}
         self._ontology: list[str] | None = None
+        self._has_annotations: bool | None = None
 
     def _resolve_image(self, stored: str) -> Path:
         path = Path(stored)
@@ -302,19 +311,173 @@ class FrigateDatabaseAdapter(DatasetAdapter):
             path = self.images_root / path
         return _match_image(path)
 
+    def _annotations_table_exists(self) -> bool:
+        if self._has_annotations is None:
+            with self._engine.connect() as conn:
+                row = conn.execute(
+                    self._text(
+                        "SELECT name FROM sqlite_master "
+                        "WHERE type='table' AND name='annotations'"
+                    )
+                ).fetchone()
+            self._has_annotations = row is not None
+        return self._has_annotations
+
     def ontology(self) -> list[str]:
         if self._ontology is not None:
             return list(self._ontology)
-        query = "SELECT frigate_label FROM samples "
-        query += "WHERE frigate_label IS NOT NULL AND length(frigate_label) > 0 "
-        query += "GROUP BY frigate_label ORDER BY MIN(rowid)"
+        if self._annotations_table_exists():
+            query = (
+                "SELECT label FROM annotations "
+                "WHERE source = :source AND label IS NOT NULL "
+                "AND length(label) > 0 "
+                "GROUP BY label ORDER BY MIN(rowid)"
+            )
+            params: dict[str, Any] = {"source": self.source}
+        else:
+            query = (
+                "SELECT frigate_label FROM samples "
+                "WHERE frigate_label IS NOT NULL AND length(frigate_label) > 0 "
+                "GROUP BY frigate_label ORDER BY MIN(rowid)"
+            )
+            params = {}
         with self._engine.connect() as conn:
-            rows = conn.execute(self._text(query)).fetchall()
+            rows = conn.execute(self._text(query), params).fetchall()
         self._ontology = [str(r[0]) for r in rows]
         return list(self._ontology)
 
     def iter_objects(self) -> Iterator[FrigateObject]:
+        if self._annotations_table_exists():
+            yield from self._iter_annotation_objects()
+        else:
+            yield from self._iter_sample_objects()
+
+    def _yield_object(
+        self,
+        object_id: str,
+        sample_id: str,
+        stored_image: str,
+        label: str,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        camera: Any,
+        timestamp: Any,
+        event_id: Any,
+        score: Any,
+        *,
+        annotation_id: Any = None,
+        review_id: Any = None,
+    ) -> Iterator[FrigateObject]:
+        if x2 <= x1 or y2 <= y1:
+            self._count_skip("degenerate_box")
+            return
+        try:
+            image_path = self._resolve_image(str(stored_image))
+        except FileNotFoundError:
+            self._count_skip("missing_image")
+            return
+        try:
+            with Image.open(image_path) as img:
+                img.load()
+                width, height = img.size
+        except (OSError, ValueError):
+            self._count_skip("image_open_failed")
+            return
+        box = convert_normalized_xyxy(BoundingBox(float(x1), float(y1), float(x2), float(y2)), width, height)
+        box = clip_box_to_image(box, width, height)
+        if not box.is_valid():
+            self._count_skip("clipped_to_empty")
+            return
         ontology = self.ontology()
+        class_id = ontology.index(str(label)) if str(label) in ontology else None
+        extra: dict[str, Any] = {
+            "sample_id": str(sample_id),
+            "camera": camera,
+            "timestamp": timestamp,
+            "event_id": event_id,
+            "frigate_score": score,
+            "source_box": [float(x1), float(y1), float(x2), float(y2)],
+            "assume_crop": self.assume_crop,
+        }
+        if annotation_id is not None:
+            extra["annotation_id"] = annotation_id
+        if review_id is not None:
+            extra["review_id"] = review_id
+        yield FrigateObject(
+            sample_id=str(object_id),
+            image_path=str(image_path),
+            class_name=str(label),
+            class_id=class_id,
+            bbox=box,
+            bbox_format="xyxy_px",
+            extra=extra,
+        )
+
+    def _iter_annotation_objects(self) -> Iterator[FrigateObject]:
+        where = [
+            "a.source = :source",
+            "a.label IS NOT NULL AND length(a.label) > 0",
+            ("a.x1 IS NOT NULL AND a.y1 IS NOT NULL "
+             "AND a.x2 IS NOT NULL AND a.y2 IS NOT NULL"),
+            "s.image_path IS NOT NULL",
+        ]
+        params: dict[str, Any] = {"source": self.source}
+        if self.statuses:
+            where.append("s.status IN :statuses")
+            params["statuses"] = self.statuses
+        if self.quality:
+            where.append("s.quality IN :quality")
+            params["quality"] = self.quality
+        sql = (
+            "SELECT a.id, a.sample_id, s.image_path, a.label, "
+            "a.x1, a.y1, a.x2, a.y2, s.camera, s.timestamp, "
+            "a.event_id, a.confidence, s.review_id "
+            "FROM annotations a JOIN samples s ON s.id = a.sample_id "
+            "WHERE " + " AND ".join(where)
+        )
+        statement = self._text(sql)
+        if self.statuses:
+            statement = statement.bindparams(self._bindparam("statuses", expanding=True))
+        if self.quality:
+            statement = statement.bindparams(self._bindparam("quality", expanding=True))
+        with self._engine.connect() as conn:
+            rows = conn.execute(statement, params).fetchall()
+            for row in rows:
+                (
+                    annotation_id,
+                    sample_id,
+                    stored_image,
+                    label,
+                    ax1,
+                    ay1,
+                    ax2,
+                    ay2,
+                    camera,
+                    timestamp,
+                    event_id,
+                    score,
+                    review_id,
+                ) = row
+                yield from self._yield_object(
+                    str(annotation_id),
+                    str(sample_id),
+                    stored_image,
+                    label,
+                    ax1,
+                    ay1,
+                    ax2,
+                    ay2,
+                    camera,
+                    timestamp,
+                    event_id,
+                    score,
+                    annotation_id=str(annotation_id),
+                    review_id=review_id,
+                )
+
+    def _iter_sample_objects(self) -> Iterator[FrigateObject]:
         where = [
             "frigate_label IS NOT NULL AND length(frigate_label) > 0",
             "image_path IS NOT NULL",
@@ -352,46 +515,19 @@ class FrigateDatabaseAdapter(DatasetAdapter):
                     event_id,
                     score,
                 ) = row
-                if fx2 <= fx1 or fy2 <= fy1:
-                    self._count_skip("degenerate_box")
-                    continue
-                try:
-                    image_path = self._resolve_image(str(stored_image))
-                except FileNotFoundError:
-                    self._count_skip("missing_image")
-                    continue
-                try:
-                    with Image.open(image_path) as img:
-                        img.load()
-                        width, height = img.size
-                except (OSError, ValueError):
-                    self._count_skip("image_open_failed")
-                    continue
-                box = convert_normalized_xyxy(
-                    BoundingBox(float(fx1), float(fy1), float(fx2), float(fy2)),
-                    width,
-                    height,
-                )
-                box = clip_box_to_image(box, width, height)
-                if not box.is_valid():
-                    self._count_skip("clipped_to_empty")
-                    continue
-                class_id = ontology.index(str(label)) if str(label) in ontology else None
-                yield FrigateObject(
-                    sample_id=str(sample_id),
-                    image_path=str(image_path),
-                    class_name=str(label),
-                    class_id=class_id,
-                    bbox=box,
-                    bbox_format="xyxy_px",
-                    extra={
-                        "camera": camera,
-                        "timestamp": timestamp,
-                        "event_id": event_id,
-                        "frigate_score": score,
-                        "source_box": [fx1, fy1, fx2, fy2],
-                        "assume_crop": self.assume_crop,
-                    },
+                yield from self._yield_object(
+                    str(sample_id),
+                    str(sample_id),
+                    stored_image,
+                    label,
+                    fx1,
+                    fy1,
+                    fx2,
+                    fy2,
+                    camera,
+                    timestamp,
+                    event_id,
+                    score,
                 )
 
     def _count_skip(self, reason: str) -> None:

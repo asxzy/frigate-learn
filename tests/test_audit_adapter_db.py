@@ -32,6 +32,22 @@ CREATE TABLE samples (
 )
 """
 
+SCHEMA_ANNOTATIONS = SCHEMA.replace(
+    "    image_path TEXT,\n",
+    "    image_path TEXT,\n    review_id TEXT,\n",
+) + ";\n" + """
+CREATE TABLE annotations (
+    id TEXT PRIMARY KEY,
+    sample_id TEXT,
+    source TEXT,
+    label TEXT,
+    x1 REAL, y1 REAL, x2 REAL, y2 REAL,
+    confidence REAL,
+    verified INTEGER,
+    event_id TEXT
+)
+"""
+
 
 def _make_image(path: Path, size=(200, 100), color=(80, 140, 220)) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -161,4 +177,87 @@ def test_db_adapter_empty_label_skipped(tmp_path):
     adapter = FrigateDatabaseAdapter(db, images_root=tmp_path)
     assert list(adapter.iter_objects()) == []
     assert adapter.ontology() == []
+
+
+def _db_with_annotations(tmp_path: Path, rows: list[dict], annotations: list[dict]) -> Path:
+    path = tmp_path / "annotated.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(SCHEMA_ANNOTATIONS)
+    for row in rows:
+        cols = list(row)
+        conn.execute(
+            "INSERT INTO samples (" + ", ".join(cols) + ") VALUES ("
+            + ", ".join("?" for _ in cols) + ")",
+            [row[c] for c in cols],
+        )
+    for ann in annotations:
+        cols = list(ann)
+        conn.execute(
+            "INSERT INTO annotations (" + ", ".join(cols) + ") VALUES ("
+            + ", ".join("?" for _ in cols) + ")",
+            [ann[c] for c in cols],
+        )
+    conn.commit()
+    conn.close()
+    return path
+
+
+def test_db_adapter_iterates_annotations_not_primary_boxes(tmp_path):
+    images = tmp_path / "images"
+    _make_image(images / "20240101" / "cam1" / "s1.jpg")
+    db = _db_with_annotations(tmp_path, [
+        {"id": "s1", "camera": "cam1", "timestamp": 1.0, "event_id": "e1",
+         "image_path": "images/20240101/cam1/s1.jpg",
+         "frigate_label": "person", "frigate_score": 0.9,
+         "frigate_x1": 0.1, "frigate_y1": 0.1, "frigate_x2": 0.2, "frigate_y2": 0.2,
+         "status": "collected", "quality": "useful"},
+    ], [
+        {"id": "ann1", "sample_id": "s1", "source": "frigate", "label": "person",
+         "x1": 0.1, "y1": 0.2, "x2": 0.4, "y2": 0.6, "confidence": 0.8,
+         "verified": 0, "event_id": "e1"},
+        {"id": "ann2", "sample_id": "s1", "source": "frigate", "label": "car",
+         "x1": 0.5, "y1": 0.1, "x2": 0.9, "y2": 0.7, "confidence": 0.7,
+         "verified": 0, "event_id": "e2"},
+        {"id": "ann3", "sample_id": "s1", "source": "vlm", "label": "bird",
+         "x1": 0.0, "y1": 0.0, "x2": 0.5, "y2": 0.5, "confidence": 0.9,
+         "verified": 1, "event_id": None},
+    ])
+    adapter = FrigateDatabaseAdapter(db, images_root=tmp_path)
+    objs = list(adapter.iter_objects())
+    assert [o.sample_id for o in objs] == ["ann1", "ann2"]  # vlm annotation excluded
+    assert objs[0].image_path == objs[1].image_path
+    assert objs[0].class_name == "person"
+    assert objs[1].class_name == "car"
+    assert objs[0].bbox.to_list() == [20.0, 20.0, 80.0, 60.0]   # 200x100 image
+    assert objs[1].bbox.to_list() == [100.0, 10.0, 180.0, 70.0]
+    assert objs[0].extra["sample_id"] == "s1"      # original sample preserved
+    assert objs[0].extra["event_id"] == "e1"
+    assert objs[1].extra["event_id"] == "e2"
+    assert objs[0].extra["annotation_id"] == "ann1"
+    assert objs[0].class_id == 0
+    assert objs[1].class_id == 1
+    assert adapter.ontology() == ["person", "car"]  # derived from annotations
+
+
+def test_db_adapter_source_filter(tmp_path):
+    images = tmp_path / "images"
+    _make_image(images / "20240101" / "cam1" / "s1.jpg")
+    db = _db_with_annotations(tmp_path, [
+        {"id": "s1", "camera": "cam1", "timestamp": 1.0, "event_id": "e1",
+         "image_path": "images/20240101/cam1/s1.jpg",
+         "frigate_label": "person", "frigate_score": 0.9,
+         "frigate_x1": 0.1, "frigate_y1": 0.1, "frigate_x2": 0.2, "frigate_y2": 0.2,
+         "status": "collected", "quality": "useful"},
+    ], [
+        {"id": "ann1", "sample_id": "s1", "source": "frigate", "label": "person",
+         "x1": 0.1, "y1": 0.1, "x2": 0.5, "y2": 0.5, "confidence": 0.8,
+         "verified": 1, "event_id": "e1"},
+        {"id": "ann2", "sample_id": "s1", "source": "vlm", "label": "bird",
+         "x1": 0.0, "y1": 0.0, "x2": 0.5, "y2": 0.5, "confidence": 0.9,
+         "verified": 1, "event_id": None},
+    ])
+    frigate_only = list(FrigateDatabaseAdapter(db, images_root=tmp_path).iter_objects())
+    vlm_only = list(FrigateDatabaseAdapter(db, images_root=tmp_path, source="vlm").iter_objects())
+    assert [o.sample_id for o in frigate_only] == ["ann1"]
+    assert [o.sample_id for o in vlm_only] == ["ann2"]
 
