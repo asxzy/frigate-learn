@@ -8,6 +8,15 @@ Depends on: current `master` at `8f3efef` plus the in-progress audit/frozen-head
 
 Make the pipeline treat **one frame as one sample** and **one object as one annotation**, so an image containing several objects is collected, verified, built, audited, and evaluated with all boxes — not just the first Frigate event/track.
 
+**Training-domain (this deployment):** the training input is the **cropped region
+image** — exactly what Frigate sends to its detector at inference — never the full
+camera frame. "One frame" below means one cropped image, and multi-object means
+several objects *inside* that cropped image. Multi-object support must not change
+the collected/training input to full frames. Crop-mode collection stays one sample
+per event (Frigate event boxes are frame-relative, so duplicate crops are skipped,
+not geometry-merged); extra objects inside a crop are expressed as additional
+annotation rows on the same sample (VLM verifier, crop space).
+
 Current known limitation from `IMPLEMENTATION_REPORT_P0_P1.md`:
 
 > A single image containing several objects is stored as one `Sample` carrying the primary `frigate_label`; the VLM *can* emit multiple objects and the verifier writes each as its own annotation, but the fallbacks used downstream ... assume one box per sample.
@@ -234,7 +243,7 @@ After Phase 1, training from VLM-verified annotations is multi-object correct. P
 3. **Frigate vs VLM duplicate labels.** IoU dedupe in the builder prevents the same physical object from being emitted twice. VLM is authoritative whenever a verified annotation exists.
 4. **Refresh semantics.** Phase 1 implements idempotent merge and event-level deletion, but full `--refresh` semantics for merged frames should be covered by focused tests before relying on it in production.
 5. **Review sync with multiple reviews per frame is out of scope.** A frame may be part of multiple Frigate review segments after merging. `samples.review_id` remains the primary review; review-sync still operates on the primary sample review. A `sample_reviews` join table can be a follow-up if multi-review confirmation is needed.
-6. **Crop/region mode remains single-object.** A crop is a per-event zoom; merging duplicate crops across events is not meaningful.
+6. **Crop/region mode keeps one sample per event.** The training input is the cropped image; Frigate event boxes are frame-relative, so duplicate crops across events are skipped, never geometry-merged. Multi-object inside a crop is expressed by multiple annotation rows on the same sample (VLM verifier writes each object it sees in crop space; the dataset builder emits every box).
 
 ## Test suite expectations
 

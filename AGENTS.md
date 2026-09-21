@@ -7,6 +7,23 @@ VLM, builds frozen YOLO dataset versions, fine-tunes small detector candidates
 deploys winners to Hailo-8. A local FastAPI dashboard (`web` extra) is the
 control panel.
 
+## Training-domain invariant
+
+Training input must match what Frigate's detector sends to its model at
+inference **100%**: the **cropped region image** (`collection.region_crop`
+snapshots), never a full camera frame. Multi-object support changes nothing
+about that contract — it only means several objects can live inside one
+cropped image: one crop carries several annotation rows (the VLM verifier
+emits one annotation per object it sees in crop space; the dataset builder
+emits every box for the image). Never switch collection to full frames to
+"fix" multi-object, and never assume full-frame coordinates for crop-mode
+boxes: stored boxes are normalized to the stored crop, and the audit DB
+adapter needs `assume_crop=True` for crop datasets. Crop-mode collection
+stays one sample per event — Frigate event boxes are frame-relative, so
+same-crop events cannot be geometry-merged; identical **full-frame**
+duplicates from separate events are merged as extra annotations on the same
+sample.
+
 ## What is implemented
 
 - **Pipeline phases (P0-P13):** golden dataset, Frigate 0.18 collector →
