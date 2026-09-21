@@ -247,3 +247,25 @@ def test_verify_records_job(config, db, tmp_path):
         job = s.get(Job, summary.job_id)
     assert job is not None
     assert job.status == "finished"
+
+
+def test_verify_label_filter_routes_through_annotations(config, db, tmp_path):
+    _config_with_vlm(config)
+    img = _make_image(tmp_path, "a.jpg")
+    _sample_record(db, "s1", "front", "person")
+    with db.session() as s:
+        row = s.get(Sample, "s1")
+        row.image_path = str(img)
+        s.add(
+            Annotation(
+                id="car-ann", sample_id="s1", source="frigate", label="car",
+                x1=0.1, y1=0.1, x2=0.6, y2=0.6, verified=0, created_at=utcnow(),
+            )
+        )
+        s.commit()
+
+    provider = FakeProvider([[]])
+    by_car = Verifier(config, db, provider=provider).verify(labels=["car"])
+    assert by_car.processed == 1
+    by_truck = Verifier(config, db, provider=provider).verify(labels=["truck"])
+    assert by_truck.processed == 0

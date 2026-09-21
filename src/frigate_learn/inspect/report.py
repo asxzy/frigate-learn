@@ -18,7 +18,7 @@ from PIL import Image
 
 from ..config import AppConfig
 from ..db import Database
-from ..models import Sample
+from ..models import Annotation, Sample
 
 THUMB_MAX_WIDTH = 480
 
@@ -65,7 +65,11 @@ def collect_records(
     if cameras:
         query = query.filter(Sample.camera.in_(cameras))
     if labels:
-        query = query.filter(Sample.frigate_label.in_(labels))
+        with_label = (
+            db.session().query(Annotation.sample_id)
+            .filter(Annotation.label.in_(labels))
+        )
+        query = query.filter(Sample.id.in_(with_label))
     if quality is not None:
         query = query.filter(Sample.quality == quality)
     if from_ts is not None:

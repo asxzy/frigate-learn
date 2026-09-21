@@ -559,6 +559,22 @@ def test_samples_verified_exact_match(seeded):
     assert [s["id"] for s in queries.samples(db, verified=1)["samples"]] == ["s1"]
 
 
+def test_samples_label_filter_routes_through_annotations(seeded):
+    from frigate_learn.models import Annotation, utcnow
+
+    _, db = seeded
+    # s1's primary label is person and its annotation is person (vlm)
+    assert [s["id"] for s in queries.samples(db, label="person")["samples"]] == ["s1"]
+    assert queries.samples(db, label="dog")["total"] == 0
+    with db.session() as s:
+        s.add(Annotation(
+            id="car-ann", sample_id="s2", source="frigate", label="car",
+            x1=0.1, y1=0.1, x2=0.5, y2=0.5, verified=0, created_at=utcnow(),
+        ))
+        s.commit()
+    assert [s["id"] for s in queries.samples(db, label="car")["samples"]] == ["s2"]
+
+
 def test_samples_limit_clamp(seeded):
     _, db = seeded
     result = queries.samples(db, limit=0)
@@ -1137,6 +1153,16 @@ def test_api_samples_reviewed_filter(tmp_path):
     unreviewed = c.get("/api/samples?reviewed=0")
     assert unreviewed.json()["total"] == 1
     assert unreviewed.json()["samples"][0]["id"] == "b"
+
+
+def test_api_samples_label_filter(tmp_path):
+    c, _ = _api_client(tmp_path)
+    person = c.get("/api/samples?label=person")
+    assert person.status_code == 200
+    assert [s["id"] for s in person.json()["samples"]] == ["s1"]
+    dog = c.get("/api/samples?label=dog")
+    assert dog.status_code == 200
+    assert dog.json()["total"] == 0
 
 
 def test_api_quality_reviewed_counts(tmp_path):

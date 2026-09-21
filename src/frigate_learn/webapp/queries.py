@@ -258,6 +258,7 @@ def samples(
     status=None,
     quality=None,
     camera=None,
+    label=None,
     verified=None,
     reviewed=None,
     limit=50,
@@ -273,6 +274,12 @@ def samples(
             query = query.filter(Sample.quality == quality)
         if camera is not None:
             query = query.filter(Sample.camera == camera)
+        if label is not None:
+            with_label = (
+                session.query(Annotation.sample_id)
+                .filter(Annotation.label == label)
+            )
+            query = query.filter(Sample.id.in_(with_label))
         if verified is not None:
             query = query.filter(Sample.verified == int(verified))
         if reviewed is not None:

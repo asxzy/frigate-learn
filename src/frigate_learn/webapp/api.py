@@ -124,13 +124,14 @@ def register_routes(app: FastAPI) -> None:
         status: str | None = None,
         quality: str | None = None,
         camera: str | None = None,
+        label: str | None = None,
         verified: int | None = None,
         reviewed: int | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> dict:
         return queries.samples(
-            db, status=status, quality=quality, camera=camera,
+            db, status=status, quality=quality, camera=camera, label=label,
             verified=verified, reviewed=reviewed, limit=limit, offset=offset,
         )
 

@@ -9,7 +9,7 @@ from frigate_learn.inspect.triage import (
     set_sample_quality,
     unset_quality,
 )
-from frigate_learn.models import Sample, utcnow
+from frigate_learn.models import Annotation, Sample, utcnow
 
 
 def _seed(config, db, camera="front"):
@@ -74,6 +74,38 @@ def test_set_batch_quality_rejects_unknown_value(config, db):
     assert raised
     with db.session() as s:
         assert all(r[0] is None for r in s.query(Sample.quality).all())
+
+
+def test_batch_quality_label_filter_uses_annotations(config, db):
+    _seed(config, db)
+    with db.session() as s:
+        s.add(
+            Annotation(
+                id="car-ann", sample_id="s0", source="frigate", label="car",
+                x1=0.1, y1=0.1, x2=0.5, y2=0.5, verified=0, created_at=utcnow(),
+            )
+        )
+        s.commit()
+    updated = set_batch_quality(config, db, "bad", labels=["car"])
+    assert updated == 1
+    with db.session() as s:
+        assert s.get(Sample, "s0").quality == "bad"
+        assert s.get(Sample, "s1").quality is None
+
+
+def test_collect_records_label_filter_uses_annotations(config, db):
+    _seed(config, db)
+    with db.session() as s:
+        s.add(
+            Annotation(
+                id="car-ann", sample_id="s2", source="frigate", label="car",
+                x1=0.1, y1=0.1, x2=0.5, y2=0.5, verified=0, created_at=utcnow(),
+            )
+        )
+        s.commit()
+    records = collect_records(config, db, labels=["car"])
+    assert [r.sample_id for r in records] == ["s2"]
+    assert collect_records(config, db, labels=["truck"]) == []
 
 
 def test_collect_records_and_html_report(config, db, tmp_path):

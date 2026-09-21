@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 from ..config import AppConfig
 from ..db import Database
-from ..models import Sample
+from ..models import Annotation, Sample
 
 QUALITY_VALUES = {"useful", "bad", "duplicate", "ignore"}
 
@@ -69,7 +69,11 @@ def set_batch_quality(
         if cameras:
             query = query.filter(Sample.camera.in_(cameras))
         if labels:
-            query = query.filter(Sample.frigate_label.in_(labels))
+            with_label = (
+                session.query(Annotation.sample_id)
+                .filter(Annotation.label.in_(labels))
+            )
+            query = query.filter(Sample.id.in_(with_label))
         if days is not None:
             from_ts = datetime.now(timezone.utc).timestamp() - days * 86400.0
             query = query.filter(Sample.timestamp >= from_ts)

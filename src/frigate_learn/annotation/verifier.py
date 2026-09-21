@@ -93,7 +93,11 @@ class Verifier:
             if cameras:
                 query = query.filter(Sample.camera.in_(cameras))
             if labels:
-                query = query.filter(Sample.frigate_label.in_(labels))
+                with_label = (
+                    session.query(Annotation.sample_id)
+                    .filter(Annotation.label.in_(labels))
+                )
+                query = query.filter(Sample.id.in_(with_label))
             if from_ts is not None:
                 query = query.filter(Sample.timestamp >= from_ts)
             if since is not None:
