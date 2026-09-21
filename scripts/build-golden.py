@@ -31,8 +31,12 @@ def load_provenance(training_root: Path) -> dict[str, dict]:
         if not line.strip():
             continue
         rec = json.loads(line)
-        if rec.get("sample_id"):
-            out[rec["sample_id"]] = rec
+        sid = rec.get("sample_id")
+        if sid:
+            out[sid] = rec
+        source = rec.get("source") or {}
+        if isinstance(source, dict) and source.get("sample_id"):
+            out.setdefault(str(source["sample_id"]), rec)
     return out
 
 
@@ -135,7 +139,8 @@ def main() -> int:
             skipped += 1
             continue
         added += 1
-        by_class[yolo_lines[0].class_id] = by_class.get(yolo_lines[0].class_id, 0) + 1
+        for yolo_line in yolo_lines:
+            by_class[yolo_line.class_id] = by_class.get(yolo_line.class_id, 0) + 1
 
     problems = golden.validate()
     print(

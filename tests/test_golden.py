@@ -91,6 +91,25 @@ def test_validate_detects_missing_files(tmp_path, source_image):
     assert any("missing image" in p for p in problems)
 
 
+def test_multi_object_image_roundtrips_all_boxes(tmp_path, source_image):
+    ds = GoldenDataset.create(tmp_path / "golden", ["person", "car"])
+    labels = [
+        YoloLine(0, 0.5, 0.5, 0.2, 0.4),
+        YoloLine(1, 0.2, 0.7, 0.3, 0.3),
+    ]
+    ds.add_image(
+        "s1",
+        source_image,
+        labels,
+        camera="front",
+        timestamp=1.0,
+    )
+    loaded = GoldenDataset.load(tmp_path / "golden")
+    assert loaded.validate() == []
+    got = read_yolo_label(loaded.samples()[0].label_path)
+    assert got == labels
+
+
 def test_write_read_dataset_yaml(tmp_path):
     path = tmp_path / "ds.yaml"
     write_dataset_yaml(path, ["dog", "cat"])
