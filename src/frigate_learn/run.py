@@ -135,7 +135,8 @@ def _step_collect(config: AppConfig, db: Database, days: int | None, ctx: dict) 
         name="collect",
         status="failed" if summary.error else "executed",
         message=f"new={summary.new_samples} dup={summary.duplicate_samples} "
-        f"fail={summary.failures} in {summary.duration_seconds:.1f}s",
+        f"merged={summary.merged_events} fail={summary.failures} "
+        f"in {summary.duration_seconds:.1f}s",
     )
 
 

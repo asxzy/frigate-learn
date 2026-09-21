@@ -108,6 +108,17 @@ def _event(e_id: str, camera: str, label: str, start: float,
     }
 
 
+class SharedFrameFake(FakeFrigate):
+    """Downloads a constant blob so distinct events share one exact frame."""
+
+    def download_clean_snapshot(self, event_id: str, output_path, timestamp=None) -> str:
+        dest = Path(output_path)
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(b"\xff\xd8\xff\xe0fakejpeg-same-frame")
+        self.downloads.append(("clean", event_id, dest, timestamp))
+        return str(dest)
+
+
 def test_reviewed_flag_stored_on_collect(config, db):
     config.collection.region_crop = False
     review = _review("r1", "front", 200, ["e1"])
@@ -456,3 +467,120 @@ def test_region_crop_debug_uses_annotated_crop(config, db):
     assert "debug-crop" in kinds
     assert "clean" not in kinds
     assert "debug" not in kinds
+
+
+def test_same_frame_events_merged_into_one_sample(config, db):
+    config.collection.region_crop = False
+    config.collection.concurrency = 1
+    fake = SharedFrameFake(
+        reviews_raw=[_review("r1", "front", 200, ["e1", "e2"])],
+        events_raw={
+            "e1": _event("e1", "front", "person", 200),
+            "e2": _event("e2", "front", "car", 200, box=[0.5, 0.1, 0.4, 0.6]),
+        },
+    )
+    summary = Collector(config, db, client=fake).collect(from_ts=0)
+    assert summary.events_new == 2
+    assert summary.new_samples == 1
+    assert summary.merged_events == 1
+    assert summary.failures == 0
+
+    with db.session() as s:
+        samples = s.query(Sample).all()
+        anns = s.query(Annotation).all()
+    assert len(samples) == 1
+    sample = samples[0]
+    assert sample.event_id == "e1"
+    assert len(anns) == 2
+    assert {a.event_id for a in anns} == {"e1", "e2"}
+    assert all(a.source == "frigate" for a in anns)
+    by_event = {a.event_id: a for a in anns}
+    assert by_event["e1"].label == "person"
+    assert by_event["e2"].label == "car"
+    assert (by_event["e2"].x1, by_event["e2"].y1, by_event["e2"].x2, by_event["e2"].y2) == (0.5, 0.1, 0.9, 0.7)
+    image = Path(sample.image_path)
+    assert image.is_file()
+    remaining = list(config.images_dir().rglob("*.jpg"))
+    assert len(remaining) == 1  # the second download was deleted
+
+    # the merged event's downloaded image was removed, only e1's file lives on
+    assert len(fake.downloads) == 2
+
+
+def test_same_frame_merge_idempotent_rerun(config, db):
+    config.collection.region_crop = False
+    config.collection.concurrency = 1
+    fake = SharedFrameFake(
+        reviews_raw=[_review("r1", "front", 200, ["e1", "e2"])],
+        events_raw={
+            "e1": _event("e1", "front", "person", 200),
+            "e2": _event("e2", "front", "car", 200),
+        },
+    )
+    first = Collector(config, db, client=fake).collect(from_ts=0)
+    assert first.merged_events == 1
+    with db.session() as s:
+        assert s.query(Annotation).count() == 2
+
+    second = Collector(config, db, client=SharedFrameFake(
+        reviews_raw=[_review("r1", "front", 200, ["e1", "e2"])],
+        events_raw={
+            "e1": _event("e1", "front", "person", 200),
+            "e2": _event("e2", "front", "car", 200),
+        },
+    )).collect(from_ts=0)
+    assert second.events_new == 0
+    assert second.merged_events == 0
+    assert second.new_samples == 0
+    with db.session() as s:
+        assert s.query(Sample).count() == 1
+        assert s.query(Annotation).count() == 2  # no duplicate annotation
+
+
+def test_same_event_temporal_duplicate_frame_not_reannotated(config, db):
+    config.collection.region_crop = False
+    config.collection.concurrency = 1
+    config.sampling.enabled = True
+    config.sampling.max_samples_per_event = 2
+    fake = SharedFrameFake(
+        reviews_raw=[_review("r1", "front", 200, ["e1"])],
+        events_raw={"e1": _event("e1", "front", "person", 200)},
+    )
+    summary = Collector(config, db, client=fake).collect(from_ts=0)
+    assert summary.new_samples == 1
+    assert summary.merged_events == 0
+    with db.session() as s:
+        assert s.query(Sample).count() == 1
+        assert s.query(Annotation).count() == 1
+
+
+def test_delete_event_merged_removes_only_that_annotation(config, db):
+    config.collection.region_crop = False
+    img_dir = config.images_dir() / "20260901" / "front"
+    img_dir.mkdir(parents=True, exist_ok=True)
+    image = img_dir / "s1.jpg"
+    image.write_bytes(b"\xff\xd8\xff\xe0fake")
+    with db.session() as s:
+        s.add(Sample(id="s1", camera="front", timestamp=200.0, event_id="e1",
+                     image_path=str(image), source="frigate", status="collected"))
+        s.flush()
+        s.add(Annotation(id="a1", sample_id="s1", source="frigate", event_id="e1",
+                         label="person", x1=0.1, y1=0.1, x2=0.4, y2=0.6, verified=0))
+        s.add(Annotation(id="a2", sample_id="s1", source="frigate", event_id="e2",
+                         label="car", x1=0.5, y1=0.1, x2=0.9, y2=0.7, verified=0))
+        s.commit()
+
+    collector = Collector(config, db, client=SharedFrameFake([], {}))
+    assert collector._delete_event("e2") == 0  # only e2's annotation removed
+    with db.session() as s:
+        anns = s.query(Annotation).all()
+        samples = s.query(Sample).all()
+    assert [a.event_id for a in anns] == ["e1"]
+    assert len(samples) == 1
+    assert image.is_file()
+
+    assert collector._delete_event("e1") == 1  # last annotation gone -> sample deleted
+    with db.session() as s:
+        assert s.query(Sample).count() == 0
+        assert s.query(Annotation).count() == 0
+    assert not image.exists()

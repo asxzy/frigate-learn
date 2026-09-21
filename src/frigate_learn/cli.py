@@ -158,6 +158,8 @@ def _summary_lines(summary: CollectSummary) -> list[str]:
         f"Duplicates: {summary.duplicate_samples:,}",
         f"Failures: {summary.failures:,}",
     ]
+    if summary.merged_events:
+        lines.append(f"Merged: {summary.merged_events:,}")
     if summary.skipped_no_box:
         lines.append(f"No-box skipped: {summary.skipped_no_box:,}")
     if summary.error:

@@ -48,6 +48,7 @@ class CollectSummary:
     events_new: int = 0
     new_samples: int = 0
     duplicate_samples: int = 0
+    merged_events: int = 0   # extra Frigate annotations merged into an existing same-frame sample
     failures: int = 0
     skipped_no_box: int = 0   # events skipped in crop mode for a degenerate box
     new_annotations: int = 0
@@ -65,10 +66,11 @@ class CollectSummary:
 class EventOutcome:
     """Per-event worker result."""
 
-    status: str          # ok | dup | fail | skip
+    status: str          # ok | dup | fail | skip | merged
     stored: int = 0      # samples inserted
     skipped: int = 0     # frames dropped as near-duplicates
     annotations: int = 0 # annotation rows inserted for this event
+    merged: int = 0      # extra annotations merged into existing samples
     error: str | None = None
 
 
@@ -203,6 +205,14 @@ class Collector:
                 row = session.query(Sample.id).filter(Sample.event_id == event_id).first()
                 if row is not None:
                     existing.add(event_id)
+            if event_ids:
+                ann_events = (
+                    session.query(Annotation.event_id)
+                    .filter(Annotation.event_id.in_(event_ids))
+                    .all()
+                )
+                for (eid,) in ann_events:
+                    existing.add(eid)
         summary.duplicate_samples = len(existing)
         if refresh:
             deleted = 0
@@ -223,22 +233,37 @@ class Collector:
         return new_events
 
     def _delete_event(self, event_id: str) -> int:
-        """Remove stored samples + annotations (+ image files) for an event."""
+        """Remove an event's stored contribution (+ image files when orphaned).
+
+        Events merged as extra annotations have no sample of their own: only
+        their annotations are removed. A sample is deleted only when it owned
+        the event (``samples.event_id``) and no annotations remain.
+        """
         deleted = 0
         with self.db.session() as session:
-            samples = (
+            annotations = (
+                session.query(Annotation).filter(Annotation.event_id == event_id).all()
+            )
+            for annotation in annotations:
+                session.delete(annotation)
+            owned = (
                 session.query(Sample).filter(Sample.event_id == event_id).all()
             )
-            for sample in samples:
+            for sample in owned:
+                remaining = (
+                    session.query(Annotation.id)
+                    .filter(Annotation.sample_id == sample.id)
+                    .count()
+                )
+                if remaining:
+                    continue
                 if sample.image_path:
                     Path(sample.image_path).unlink(missing_ok=True)
                 if sample.debug_image_path:
                     Path(sample.debug_image_path).unlink(missing_ok=True)
-                session.query(Annotation).filter(Annotation.sample_id == sample.id).delete()
-            for sample in samples:
                 session.delete(sample)
+                deleted += 1
             session.commit()
-            deleted = len(samples)
         return deleted
 
     def _download_and_store(
@@ -270,6 +295,9 @@ class Collector:
                 if outcome.status == "ok":
                     summary.new_samples += outcome.stored
                     summary.new_annotations += outcome.annotations
+                    summary.merged_events += outcome.merged
+                elif outcome.status == "merged":
+                    summary.merged_events += outcome.merged
                 elif outcome.status == "skip":
                     summary.skipped_no_box += 1
                 elif outcome.status == "fail":
@@ -338,6 +366,54 @@ class Collector:
                     return True
         return False
 
+    def _find_exact_duplicate_sample(self, camera: str, image_hash: str) -> Sample | None:
+        """Locate the existing full-frame sample for an exact SHA-256 match."""
+        if image_hash is None:
+            return None
+        with self.db.session() as session:
+            return (
+                session.query(Sample)
+                .filter(Sample.camera == camera, Sample.image_hash == image_hash)
+                .order_by(Sample.created_at.asc())
+                .first()
+            )
+
+    def _merge_event_frame(self, event, sample: Sample) -> bool:
+        """Add one Frigate annotation for ``event`` onto an existing sample.
+
+        Returns False when ``(sample, event)`` is already annotated (the merge
+        is idempotent — e.g. a later temporal frame of the same event).
+        """
+        with self.db.session() as session:
+            existing = (
+                session.query(Annotation.id)
+                .filter(
+                    Annotation.sample_id == sample.id,
+                    Annotation.event_id == event.id,
+                )
+                .first()
+            )
+            if existing is not None:
+                return False
+            box = event.box
+            session.add(
+                Annotation(
+                    id=str(uuid.uuid4()),
+                    sample_id=sample.id,
+                    event_id=event.id,
+                    source="frigate",
+                    label=event.label,
+                    x1=box[0] if box else None,
+                    y1=box[1] if box else None,
+                    x2=box[2] if box else None,
+                    y2=box[3] if box else None,
+                    confidence=event.score if event.score is not None else event.top_score,
+                    verified=0,
+                )
+            )
+            session.commit()
+        return True
+
     def _process_event(
         self,
         event_id: str,
@@ -364,6 +440,7 @@ class Collector:
             stored = 0
             skipped = 0
             annotations = 0
+            merged = 0
             for frame_index, frame_ts in enumerate(self._frame_times(event)):
                 sample_id = str(uuid.uuid4())
                 image_path = self._image_path(event.camera, event.start_time, sample_id)
@@ -377,8 +454,17 @@ class Collector:
 
                 if self._is_duplicate_frame(event.camera, image_hash, image_path):
                     image_path.unlink(missing_ok=True)
-                    skipped += 1
-                    debug("skipped duplicate frame", event_id=event.id, camera=event.camera)
+                    if crop:
+                        skipped += 1
+                        debug("skipped duplicate crop", event_id=event.id, camera=event.camera)
+                        continue
+                    target = self._find_exact_duplicate_sample(event.camera, image_hash)
+                    if target is None or not self._merge_event_frame(event, target):
+                        skipped += 1
+                        debug("skipped duplicate frame", event_id=event.id, camera=event.camera)
+                        continue
+                    merged += 1
+                    debug("merged same-frame event", event_id=event.id, sample_id=target.id)
                     continue
 
                 debug_path = None
@@ -428,6 +514,7 @@ class Collector:
                             Annotation(
                                 id=str(uuid.uuid4()),
                                 sample_id=sample_id,
+                                event_id=event.id,
                                 source="frigate",
                                 label=event.label,
                                 x1=sample.frigate_x1,
@@ -453,7 +540,10 @@ class Collector:
 
             if stored:
                 return EventOutcome(status="ok", stored=stored, skipped=skipped,
-                                    annotations=annotations)
+                                    annotations=annotations, merged=merged)
+            if merged:
+                return EventOutcome(status="merged", skipped=skipped,
+                                    annotations=annotations, merged=merged)
             return EventOutcome(status="dup", stored=0, skipped=skipped)
         except FrigateAPIError as exc:
             error("event failed (api)", event_id=event_id, error=str(exc))
