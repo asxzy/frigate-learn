@@ -11,6 +11,7 @@ Implemented commands (P1):
 from __future__ import annotations
 
 import sys
+import uuid
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -20,7 +21,7 @@ from . import __version__
 from .collection.collector import CollectSummary, Collector
 from .config import AppConfig, load_config
 from .db import Database
-from .logutil import configure_logging, get_logger
+from .logutil import JobLogTailHandler, configure_logging, get_logger, info
 from .times import parse_time_arg
 
 logger = get_logger("frigate_learn.cli")
@@ -214,9 +215,11 @@ def collect(
     collector = Collector(config, database)
     severity = list(severities) if severities else None
 
-    def progress(message: str) -> None:
-        click.echo(message)
-
+    job_id = str(uuid.uuid4())
+    db_path = str(config.database_path())
+    run_logger = get_logger("frigate_learn")
+    tail_handler = JobLogTailHandler(db_path, job_id)
+    run_logger.addHandler(tail_handler)
     try:
         summary = collector.collect(
             from_ts=from_ts,
@@ -226,16 +229,20 @@ def collect(
             severity=severity,
             limit=limit if limit is not None else config.collection.max_reviews,
             concurrency=concurrency,
-            progress=progress,
+            progress=info,
             refresh=refresh_images,
+            job_id=job_id,
         )
+        for line in _summary_lines(summary):
+            info(line)
+        if summary.error:
+            info("collection failed", error=summary.error)
+            sys.exit(1)
     except Exception as exc:  # fatal (e.g. bad token / connection refused)
+        info("collection failed", error=str(exc))
         raise click.ClickException(f"collection failed: {exc}")
-
-    for line in _summary_lines(summary):
-        click.echo(line)
-    if summary.error:
-        sys.exit(1)
+    finally:
+        run_logger.removeHandler(tail_handler)
 
 
 # --- status ----------------------------------------------------------------
@@ -504,16 +511,31 @@ def verify(
         )
     database = _db(config)
     database.migrate()
-    summary = Verifier(config, database).verify(
-        force=force, limit=limit,
-        cameras=list(cameras) or None, labels=list(labels) or None, days=days,
-        since=since,
-    )
-    click.echo(
-        f"processed={summary.processed} annotated={summary.annotated} "
-        f"skipped={summary.skipped} failed={summary.failed} "
-        f"dropped={summary.dropped} objects={summary.objects_written}"
-    )
+    job_id = str(uuid.uuid4())
+    db_path = str(config.database_path())
+    run_logger = get_logger("frigate_learn")
+    tail_handler = JobLogTailHandler(db_path, job_id)
+    run_logger.addHandler(tail_handler)
+    try:
+        summary = Verifier(config, database, job_id=job_id).verify(
+            force=force, limit=limit,
+            cameras=list(cameras) or None, labels=list(labels) or None, days=days,
+            since=since,
+        )
+        info(
+            "verify finished",
+            processed=summary.processed,
+            annotated=summary.annotated,
+            skipped=summary.skipped,
+            failed=summary.failed,
+            dropped=summary.dropped,
+            objects=summary.objects_written,
+        )
+    except Exception as exc:
+        info("verify failed", error=str(exc))
+        raise
+    finally:
+        run_logger.removeHandler(tail_handler)
     if summary.error:
         raise click.ClickException(f"verify failed: {summary.error}")
 
@@ -996,6 +1018,37 @@ def web(host: str, port: int) -> None:
     from .webapp.app import create_app
 
     uvicorn.run(create_app(), host=host, port=port)
+
+
+# --- audit ------------------------------------------------------------------
+
+
+@cli.command(name="audit-dataset", context_settings={"ignore_unknown_options": True, "allow_extra_args": True})
+@click.argument("args", nargs=-1, type=click.UNPROCESSED)
+@click.pass_context
+@click.option("--config", "config_path", type=click.Path(dir_okay=False), default=None,
+              help="Path to YAML config (default: config.yaml or FRIGATE_LEARN_CONFIG).")
+def audit_dataset(ctx: click.Context, args: tuple[str, ...], config_path: str | None) -> None:
+    """Alias for `frigate-learn audit run` (dataset audit + pseudo-labeling)."""
+    from .audit.cli import audit_group
+
+    parts = list(args)
+    if parts and parts[0] == "run":
+        parts = parts[1:]
+    argv = ["run", *parts]
+    if config_path:
+        argv.append("--config")
+        argv.append(config_path)
+    audit_group.main(args=argv, standalone_mode=False)
+
+
+def _register_audit() -> None:
+    from .audit.cli import audit_group
+
+    cli.add_command(audit_group)
+
+
+_register_audit()
 
 
 def main() -> None:

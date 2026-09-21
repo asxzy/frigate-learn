@@ -40,11 +40,16 @@ class VerifySummary:
 
 class Verifier:
     def __init__(
-        self, config: AppConfig, db: Database, provider: VLMProvider | None = None
+        self,
+        config: AppConfig,
+        db: Database,
+        provider: VLMProvider | None = None,
+        job_id: str | None = None,
     ) -> None:
         self.config = config
         self.db = db
         self.provider = provider or self._default_provider()
+        self.job_id = job_id
 
     def _default_provider(self) -> VLMProvider:
         vlm = self.config.vlm
@@ -75,7 +80,7 @@ class Verifier:
         """Verify unverified samples (or all when ``force``)."""
         started = datetime.now(timezone.utc)
         summary = VerifySummary()
-        job_id = str(uuid.uuid4())
+        job_id = self.job_id or str(uuid.uuid4())
         summary.job_id = job_id
         self._record_job(job_id, status="running")
 
@@ -236,19 +241,25 @@ class Verifier:
         with self.db.session() as session:
             job = session.get(Job, job_id)
             if job:
+                try:
+                    current = json.loads(job.metadata_json) if job.metadata_json else {}
+                except (ValueError, TypeError):
+                    current = {}
+                metadata = {
+                    "processed": summary.processed,
+                    "annotated": summary.annotated,
+                    "skipped": summary.skipped,
+                    "failed": summary.failed,
+                    "dropped": summary.dropped,
+                    "objects_written": summary.objects_written,
+                }
+                if isinstance(current, dict):
+                    tail = current.get("log_tail")
+                    if isinstance(tail, list):
+                        metadata["log_tail"] = tail
                 job.status = "finished"
                 job.finished_at = utcnow()
-                job.metadata_json = json.dumps(
-                    {
-                        "processed": summary.processed,
-                        "annotated": summary.annotated,
-                        "skipped": summary.skipped,
-                        "failed": summary.failed,
-                        "dropped": summary.dropped,
-                        "objects_written": summary.objects_written,
-                    },
-                    sort_keys=True,
-                )
+                job.metadata_json = json.dumps(metadata, sort_keys=True)
                 session.commit()
 
     def _fail_job(self, job_id: str, exc: Exception) -> None:

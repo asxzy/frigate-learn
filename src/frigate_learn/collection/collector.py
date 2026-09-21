@@ -97,6 +97,7 @@ class Collector:
         concurrency: int | None = None,
         progress: ProgressFn | None = None,
         refresh: bool = False,
+        job_id: str | None = None,
     ) -> CollectSummary:
         started = datetime.now(timezone.utc)
         summary = CollectSummary(
@@ -106,7 +107,7 @@ class Collector:
             labels=list(labels or self.config.collection.labels),
             severity=list(severity or self.config.collection.severity),
         )
-        job_id = str(uuid.uuid4())
+        job_id = job_id or str(uuid.uuid4())
         summary.job_id = job_id
         self.db.migrate()
         self._record_job(job_id, type="collect", status="running", started_at=utcnow())
@@ -526,9 +527,18 @@ class Collector:
         with self.db.session() as session:
             job = session.get(Job, job_id)
             if job:
+                try:
+                    current = json.loads(job.metadata_json) if job.metadata_json else {}
+                except (ValueError, TypeError):
+                    current = {}
+                metadata_obj = json.loads(metadata)
+                if isinstance(current, dict):
+                    tail = current.get("log_tail")
+                    if isinstance(tail, list):
+                        metadata_obj["log_tail"] = tail
                 job.status = "finished"
                 job.finished_at = utcnow()
-                job.metadata_json = metadata
+                job.metadata_json = json.dumps(metadata_obj, sort_keys=True)
                 session.commit()
 
     def _fail_job(self, job_id: str, exc: Exception) -> None:
