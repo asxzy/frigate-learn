@@ -43,10 +43,9 @@ function num(v, d) {
 
 function fmtTs(v) {
   if (v === null || v === undefined || v === "") return "";
-  if (typeof v === "number" && Number.isFinite(v)) {
-    return new Date(v * 1000).toLocaleString();
-  }
-  return String(v).slice(0, 19).replace("T", " ");
+  const d = typeof v === "number" && Number.isFinite(v) ? new Date(v * 1000) : new Date(v);
+  if (Number.isNaN(d.getTime())) return String(v);
+  return d.toLocaleString();
 }
 
 function fmtBytes(n) {
@@ -81,6 +80,13 @@ function pillNode(text, quality) {
   span.className = "pill " + (quality || "");
   span.textContent = text;
   return span;
+}
+
+function labelBadge(src, value, tone) {
+  const b = h("div", "label-badge" + (tone ? " badge-" + tone : ""));
+  b.appendChild(h("span", "label-src", src));
+  b.appendChild(h("span", "label-name", value));
+  return b;
 }
 
 function countCard(title, number, sub) {
@@ -266,84 +272,144 @@ async function renderJobDrawer(jobId) {
   }
 }
 
-let charts = [];
-function clearCharts() {
-  for (const c of charts) { try { c.destroy(); } catch (e) {} }
-  charts = [];
-}
-
 function plotBox(container) {
   const box = h("div", "plot");
   container.appendChild(box);
   return box;
 }
 
-function renderScatter(container, points) {
-  if (typeof uPlot === "undefined") {
-    container.innerHTML = "";
-    container.appendChild(h("div", "plot-missing", "uPlot vendor script missing"));
-    return;
+function chartExtent(values) {
+  let lo = Infinity, hi = -Infinity;
+  for (const v of values) {
+    if (v === null || v === undefined || !Number.isFinite(v)) continue;
+    if (v < lo) lo = v;
+    if (v > hi) hi = v;
   }
+  if (!Number.isFinite(lo) || !Number.isFinite(hi)) return null;
+  if (lo === hi) { lo -= 0.05; hi += 0.05; }
+  const pad = (hi - lo) * 0.08;
+  return [lo - pad, hi + pad];
+}
+
+function chartTicks(lo, hi, n) {
+  const span = hi - lo;
+  if (!(span > 0)) return [lo];
+  const mag = Math.pow(10, Math.floor(Math.log10(span / n)));
+  const step = [1, 2, 2.5, 5, 10].find((m) => m * mag >= span / n - 1e-9) * mag;
+  const out = [];
+  for (let v = Math.ceil(lo / step) * step; v <= hi + 1e-9; v += step) out.push(v);
+  return out;
+}
+
+function chartNum(v) {
+  if (Number.isInteger(v)) return String(v);
+  return v.toFixed(Math.abs(v) < 1 ? 2 : 1);
+}
+
+function chartLegend(series) {
+  const wrap = h("div", "chart-legend");
+  for (const s of series) {
+    const item = h("span", "chart-legend-item");
+    const sw = h("span", "chart-legend-swatch");
+    sw.style.background = s.color;
+    item.appendChild(sw);
+    item.appendChild(h("span", null, s.label));
+    wrap.appendChild(item);
+  }
+  return wrap;
+}
+
+function lineChartSVG(width, height, xs, series, xLabel) {
+  const pl = 50, pr = 14, pt = 14, pb = 32;
+  const iw = width - pl - pr, ih = height - pt - pb;
+  const yExt = chartExtent(series.flatMap((s) => s.data));
+  if (!yExt) return "";
+  const x0 = xs[0], x1 = xs[xs.length - 1];
+  const xExt = x0 === x1 ? [x0 - 0.5, x0 + 0.5] : [x0, x1];
+  const xSpan = xExt[1] - xExt[0], ySpan = yExt[1] - yExt[0];
+  const px = (x) => pl + ((x - xExt[0]) / xSpan) * iw;
+  const py = (y) => pt + ((yExt[1] - y) / ySpan) * ih;
+  let g = "";
+  for (const y of chartTicks(yExt[0], yExt[1], 5)) {
+    g += `<line x1="${pl}" y1="${py(y).toFixed(1)}" x2="${width - pr}" y2="${py(y).toFixed(1)}" class="chart-grid"/>`;
+    g += `<text x="${pl - 6}" y="${(py(y) + 4).toFixed(1)}" text-anchor="end">${chartNum(y)}</text>`;
+  }
+  for (const x of chartTicks(xExt[0], xExt[1], 8)) {
+    g += `<text x="${px(x).toFixed(1)}" y="${height - 12}" text-anchor="middle">${chartNum(x)}</text>`;
+  }
+  if (xLabel) {
+    g += `<text x="${(pl + iw / 2).toFixed(1)}" y="${height - 2}" text-anchor="middle" class="chart-axis">${esc(xLabel)}</text>`;
+  }
+  for (const s of series) {
+    let d = "", pen = false;
+    s.data.forEach((v, i) => {
+      if (v === null || v === undefined || !Number.isFinite(v)) { pen = false; return; }
+      d += (pen ? "L" : "M") + px(xs[i]).toFixed(1) + " " + py(v).toFixed(1) + " ";
+      pen = true;
+    });
+    const dash = (s.dash || []).map(String).join(",");
+    const dashAttr = dash ? ";stroke-dasharray:" + dash : "";
+    g += `<path d="${d}" style="stroke:${s.color};stroke-width:${s.width || 2}${dashAttr};fill:none;"/>`;
+  }
+  return `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${g}</svg>`;
+}
+
+function scatterSVG(width, height, points) {
+  const pl = 54, pr = 14, pt = 14, pb = 34;
+  const iw = width - pl - pr, ih = height - pt - pb;
+  const xExt = chartExtent(points.map((p) => p.x));
+  const yExt = chartExtent(points.map((p) => p.y));
+  if (!xExt || !yExt) return "";
+  const xSpan = xExt[1] - xExt[0], ySpan = yExt[1] - yExt[0];
+  const px = (x) => pl + ((x - xExt[0]) / xSpan) * iw;
+  const py = (y) => pt + ((yExt[1] - y) / ySpan) * ih;
+  let g = "";
+  for (const y of chartTicks(yExt[0], yExt[1], 5)) {
+    g += `<line x1="${pl}" y1="${py(y).toFixed(1)}" x2="${width - pr}" y2="${py(y).toFixed(1)}" class="chart-grid"/>`;
+    g += `<text x="${pl - 6}" y="${(py(y) + 4).toFixed(1)}" text-anchor="end">${chartNum(y)}</text>`;
+  }
+  for (const x of chartTicks(xExt[0], xExt[1], 6)) {
+    g += `<text x="${px(x).toFixed(1)}" y="${height - 12}" text-anchor="middle">${chartNum(x)}</text>`;
+  }
+  for (const p of points) {
+    g += `<circle cx="${px(p.x).toFixed(1)}" cy="${py(p.y).toFixed(1)}" r="5" class="chart-dot"/>`;
+  }
+  g += `<text x="${(pl + iw / 2).toFixed(1)}" y="${height - 2}" text-anchor="middle" class="chart-axis">latency ms</text>`;
+  g += `<text transform="rotate(-90 ${12} ${(pt + ih / 2).toFixed(1)})" x="${12}" y="${(pt + ih / 2).toFixed(1)}" text-anchor="middle" class="chart-axis">mAP50</text>`;
+  return `<svg width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${g}</svg>`;
+}
+
+function renderScatter(container, points) {
   if (!points.length) {
     container.innerHTML = "";
     container.appendChild(h("div", "plot-missing", "no valid data points"));
     return;
   }
-  const xs = points.map((p) => p.x);
-  const ys = points.map((p) => p.y);
   const width = Math.max(320, (container.clientWidth || 600) - 20);
-  const opts = {
-    width, height: 340,
-    scales: { x: { time: false }, y: {} },
-    axes: [ { label: "latency ms" }, { label: "mAP50" } ],
-    series: [
-      {},
-      {
-        label: "mAP50",
-        paths: () => null,
-        points: { show: true, size: 8, fill: "#56c7ff", stroke: "#0d1117" },
-      },
-    ],
-  };
-  charts.push(new uPlot(opts, [xs, ys], container));
+  container.innerHTML = scatterSVG(width, 340, points);
 }
 
 function renderLineChart(container, xs, series) {
-  if (typeof uPlot === "undefined") {
-    container.innerHTML = "";
-    container.appendChild(h("div", "plot-missing", "uPlot vendor script missing"));
-    return;
-  }
   if (!xs.length) {
     container.innerHTML = "";
     container.appendChild(h("div", "plot-missing", "no numeric epoch data"));
     return;
   }
+  if (!chartExtent(series.flatMap((s) => s.data))) {
+    container.innerHTML = "";
+    container.appendChild(h("div", "plot-missing", "no valid data points"));
+    return;
+  }
   const width = Math.max(320, (container.clientWidth || 600) - 20);
-  const opts = {
-    width, height: 340,
-    legend: { show: true },
-    scales: { x: { time: false }, y: { auto: false, range: [0, 1] } },
-    axes: [ { label: "epoch" }, {} ],
-    series: [
-      {},
-      ...series.map((s) => ({
-        label: s.label,
-        stroke: s.color,
-        width: s.width === undefined ? 2 : s.width,
-        dash: s.dash || [],
-        spanGaps: true,
-        points: { show: false },
-      })),
-    ],
-  };
-  charts.push(new uPlot(opts, [xs, ...series.map((s) => s.data)], container));
+  container.innerHTML = lineChartSVG(width, 340, xs, series, "epoch");
+  container.appendChild(chartLegend(series));
 }
 
 const views = {
   overview: { fn: renderOverview, loaded: false, stale: false },
   benchmark: { fn: renderBenchmark, loaded: false, stale: false },
   quality: { fn: renderQuality, loaded: false, stale: false },
+  audit: { fn: renderAudit, loaded: false, stale: false },
   datasets: { fn: renderDatasets, loaded: false, stale: false },
   training: { fn: renderTraining, loaded: false, stale: false },
   triage: { fn: renderTriage, loaded: false, stale: false },
@@ -380,6 +446,19 @@ function activate(name) {
 
 document.querySelectorAll(".tab").forEach((t) => {
   t.addEventListener("click", () => activate(t.dataset.view));
+});
+
+document.addEventListener("keydown", (ev) => {
+  if (currentView !== "audit" || !auditState.detailId) return;
+  const t = ev.target;
+  if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT")) return;
+  if (ev.key === "ArrowLeft") {
+    auditNav(-1);
+    ev.preventDefault();
+  } else if (ev.key === "ArrowRight") {
+    auditNav(1);
+    ev.preventDefault();
+  }
 });
 
 async function renderOverview(sec) {
@@ -475,7 +554,6 @@ function drawChips(strip, steps, reports) {
 }
 
 async function renderBenchmark(sec) {
-  clearCharts();
   const data = await api("/api/benchmark");
   const deps = await api("/api/deployments");
   sec.innerHTML = "";
@@ -650,6 +728,478 @@ async function renderQuality(sec) {
   }
 }
 
+const auditState = {
+  status: "", label: "", offset: 0, limit: 100,
+  labels: [], detailId: null, updatedAt: null, viewSamples: [],
+};
+
+const AUDIT_CHECKS = [
+  ["bbox_covers_object", "bbox covers object"],
+];
+
+async function renderAudit(sec) {
+  const params = new URLSearchParams();
+  if (auditState.status) params.set("status", auditState.status);
+  if (auditState.label) params.set("label", auditState.label);
+  params.set("limit", auditState.limit);
+  params.set("offset", auditState.offset);
+  const data = await api("/api/audit?" + params.toString());
+  auditState.labels = data.labels || [];
+  auditState.updatedAt = data.updated_at;
+  auditState.viewSamples = data.samples || [];
+  sec.innerHTML = "";
+  const s = data.stats || {};
+  const updated = fmtTs(data.updated_at) || "—";
+  sec.appendChild(h("div", "status-line",
+    `audit root ${esc(data.root)} · pipeline v${num(data.pipeline_version, 0)} · updated ${updated}`));
+  if (!data.exists || !s.total) {
+    sec.appendChild(h("div", "placeholder",
+      "no audit output yet — run `.venv/bin/frigate-learn audit run` to seed SAM + VLM reconciliation decisions"));
+    return;
+  }
+
+  const cards = h("div", "cards");
+  cards.appendChild(countCard("Samples", s.total, `processed ${num(s.processed, 0)}`));
+  cards.appendChild(countCard("SAM ok", s.sam_ok, `failures ${num(s.sam_fail, 0)}`));
+  cards.appendChild(countCard("VLM verdicts", s.vlm_calls, `failed ${num(s.vlm_fail, 0)} · pending ${num(s.vlm_transport, 0)}`));
+  cards.appendChild(countCard("VLM+SAM agree", s.agreements, `disagreements ${num(s.disagreements, 0)}`));
+  cards.appendChild(countCard("Accepted", s.accepted, "kept for training"));
+  cards.appendChild(countCard("Dropped", s.dropped, "rejected by a stage"));
+  cards.appendChild(countCard("Pending", s.pending, "VLM transport — retry with --resume"));
+  cards.appendChild(countCard("Acceptance", (s.acceptance_rate * 100).toFixed(1) + "%",
+    `positives ${num(s.positives_written, 0)} · hard negatives ${num(s.hard_negatives_written, 0)}`));
+  sec.appendChild(cards);
+
+  const banner = auditFailureBanner(s);
+  if (banner) sec.appendChild(banner);
+
+  sec.appendChild(tableCaption("Decision funnel · one object per row, width = share of candidates"));
+  sec.appendChild(renderAuditFunnel(s));
+
+  sec.appendChild(tableCaption("Per class"));
+  sec.appendChild(renderAuditClassBars(s.by_class || {}));
+
+  const bar = h("div", "filter-bar");
+  const statusSel = filterSelect("status", ["KEEP", "DROP", "PENDING"], auditState.status,
+    (v) => { auditState.status = v; auditState.offset = 0; auditState.detailId = null; render("audit"); });
+  const labelSel = filterSelect("label", auditState.labels.slice().sort(), auditState.label,
+    (v) => { auditState.label = v; auditState.offset = 0; auditState.detailId = null; render("audit"); });
+  bar.appendChild(statusSel);
+  bar.appendChild(labelSel);
+  bar.appendChild(h("span", "status-line", `${data.total} sample(s)`));
+  const prev = h("button", "btn", "← prev");
+  prev.disabled = auditState.offset <= 0;
+  prev.addEventListener("click", () => {
+    auditState.offset = Math.max(0, auditState.offset - auditState.limit);
+    render("audit");
+  });
+  const next = h("button", "btn", "next →");
+  next.disabled = auditState.offset + (data.samples || []).length >= data.total;
+  next.addEventListener("click", () => {
+    auditState.offset += auditState.limit;
+    render("audit");
+  });
+  bar.appendChild(prev);
+  bar.appendChild(next);
+  sec.appendChild(bar);
+
+  if (auditState.detailId) {
+    await renderAuditDetail(sec, null, auditState.detailId);
+  }
+
+  sec.appendChild(tableCaption("Samples · SAM + VLM reconciliation"));
+  const samples = data.samples || [];
+  if (!samples.length) {
+    sec.appendChild(h("div", "placeholder", "no audit samples match the current filters"));
+  } else {
+    const table = h("table");
+    table.innerHTML = `
+      <thead><tr><th>sample</th><th>camera</th><th>Frigate</th><th>SAM</th><th>verdict</th><th>reason</th>
+      <th>failing</th><th>artifacts</th><th></th></tr></thead>
+      <tbody></tbody>`;
+    const tbody = table.querySelector("tbody");
+    for (const smp of samples) {
+      const tr = h("tr");
+      const failTxt = (smp.failing_conditions || []).join(", ") || "—";
+      const artifacts = [];
+      if (smp.has_reconciliation) artifacts.push("recon");
+      if (smp.has_mask) artifacts.push("mask");
+      tr.innerHTML = `
+        <td class="mono">${esc(smp.sample_id.slice(0, 12))}</td>
+        <td>${esc((smp.source_extra && smp.source_extra.camera) || "—")}</td>
+        <td>${esc(smp.frigate_label || "—")}</td>
+        <td>${esc(smp.sam_class || "—")}</td>
+        <td>${pill(smp.status || "—", auditPillClass(smp.status))}${smp.override ? " *" : ""}</td>
+        <td>${esc(smp.reason || "—")}</td>
+        <td>${esc(failTxt)}</td>
+        <td>${esc(artifacts.join(" · ") || "—")}</td>`;
+      const td = h("td");
+      const btn = h("button", "btn", smp.sample_id === auditState.detailId ? "hide" : "detail");
+      btn.dataset.sample = smp.sample_id;
+      btn.addEventListener("click", () => {
+        auditState.detailId = smp.sample_id === auditState.detailId ? null : smp.sample_id;
+        refreshAuditButtons(null);
+        if (!auditState.detailId) {
+          const p = document.querySelector("#view-audit .detail-panel");
+          if (p) p.remove();
+          return;
+        }
+        renderAuditDetail(section("audit"), null, auditState.detailId).then(() => {
+          const p = document.querySelector("#view-audit .detail-panel");
+          if (p) p.scrollIntoView({ block: "nearest" });
+        });
+      });
+      td.appendChild(btn);
+      tr.appendChild(td);
+      tbody.appendChild(tr);
+    }
+    sec.appendChild(table);
+    refreshAuditButtons(table);
+  }
+}
+
+function refreshAuditButtons(table) {
+  const scope = table || document.querySelector("#view-audit");
+  if (!scope) return;
+  for (const btn of scope.querySelectorAll("button[data-sample]")) {
+    btn.textContent = btn.dataset.sample === auditState.detailId ? "hide" : "detail";
+  }
+}
+
+function auditPillClass(status) {
+  if (status === "KEEP") return "pass";
+  if (status === "DROP") return "fail";
+  if (status === "PENDING") return "running";
+  return "";
+}
+
+function auditFailureBanner(s) {
+  if (!s.total) return null;
+  if (s.sam_ok === 0 && s.sam_fail > 0) {
+    return h("div", "audit-banner",
+      `SAM 3.1 produced no segmentations (${num(s.sam_fail, 0)}/${num(s.total, 0)} sam_failure). ` +
+      `The sam3-mlx extra is not installed or the checkpoint failed, so no SAM mask/box, reconciliation image, ` +
+      `or VLM verdict exists for any sample. Install it with .venv/bin/pip install -e ".[audit]" ` +
+      `and re-run .venv/bin/frigate-learn audit run --resume`);
+  }
+  if (s.vlm_transport > 0 && s.pending > 0) {
+    return h("div", "audit-banner",
+      `${num(s.pending, 0)} sample(s) are PENDING (VLM transport failure). Retry them with ` +
+      `.venv/bin/frigate-learn audit run --resume once the audit VLM endpoint is reachable`);
+  }
+  return null;
+}
+
+function renderAuditFunnel(s) {
+  const stages = [
+    ["all candidates", s.total, "var(--gray)"],
+    ["SAM segment ok", s.sam_ok, "var(--blue)"],
+    ["VLM verdict parsed", s.vlm_calls + s.vlm_fail, "var(--amber)"],
+    ["KEEP (accepted)", s.accepted, "var(--lime)"],
+  ];
+  const wrap = h("div", "funnel");
+  const max = Math.max(s.total, 1);
+  for (const [label, count, color] of stages) {
+    const row = h("div", "funnel-row");
+    row.appendChild(h("span", "funnel-label", label));
+    const track = h("div", "funnel-track");
+    const fill = h("div", "funnel-bar");
+    fill.style.width = (count / max * 100).toFixed(1) + "%";
+    fill.style.background = color;
+    track.appendChild(fill);
+    row.appendChild(track);
+    row.appendChild(h("span", "funnel-count", `${num(count, 0)} · ${(count / max * 100).toFixed(1)}%`));
+    wrap.appendChild(row);
+  }
+  wrap.appendChild(h("div", "status-line",
+    "grey = all candidates · blue = SAM produced a mask+box · amber = VLM answered · green = conservative rule kept it"));
+  return wrap;
+}
+
+function renderAuditClassBars(byClass) {
+  const entries = Object.entries(byClass).sort((a, b) => b[1].processed - a[1].processed);
+  if (!entries.length) {
+    return h("div", "placeholder", "no per-class data yet");
+  }
+  const wrap = h("div", "bars");
+  for (const [label, cs] of entries) {
+    const row = h("div", "bar-row");
+    row.appendChild(h("span", null, label + ` (${num(cs.processed, 0)})`));
+    const track = h("div", "bar-track audit-stack");
+    const total = Math.max(cs.processed, 1);
+    const acc = h("div", "bar-fill-frag accept");
+    acc.style.width = (cs.accepted / total * 100) + "%";
+    const drp = h("div", "bar-fill-frag drop");
+    drp.style.width = (cs.dropped / total * 100) + "%";
+    const pen = h("div", "bar-fill-frag pending");
+    pen.style.width = (cs.pending / total * 100) + "%";
+    track.appendChild(acc);
+    track.appendChild(drp);
+    track.appendChild(pen);
+    row.appendChild(track);
+    row.appendChild(h("span", "bar-count",
+      `✓${num(cs.accepted, 0)} ✗${num(cs.dropped, 0)} ?${num(cs.pending, 0)}`));
+    wrap.appendChild(row);
+  }
+  return wrap;
+}
+
+function auditNav(delta) {
+  const list = auditState.viewSamples || [];
+  if (!auditState.detailId || list.length < 2) return;
+  const i = list.findIndex((x) => x.sample_id === auditState.detailId);
+  if (i === -1) return;
+  auditState.detailId = list[(i + delta + list.length) % list.length].sample_id;
+  renderAuditDetail(section("audit"), null, auditState.detailId);
+  refreshAuditButtons(null);
+}
+
+async function setAuditOverride(sampleId, status, noteInput) {
+  try {
+    await api("/api/audit/overrides/" + encodeURIComponent(sampleId), {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ status, note: noteInput.value }),
+    });
+    render("audit");
+  } catch (e) {
+    errorBox(section("audit").querySelector(".detail-override"), e.message);
+  }
+}
+
+async function renderAuditDetail(sec, table, sampleId) {
+  const seq = (auditState.detailSeq = (auditState.detailSeq || 0) + 1);
+  if (!sampleId) {
+    const prev = sec.querySelector(".detail-panel");
+    if (prev) prev.remove();
+    return;
+  }
+  const det = await api("/api/audit/" + encodeURIComponent(sampleId));
+  if (seq !== auditState.detailSeq) return;
+  const panel = h("div", "detail-panel");
+  const navList = auditState.viewSamples || [];
+  const navIdx = navList.findIndex((x) => x.sample_id === sampleId);
+  const nav = h("div", "detail-nav");
+  const prevBtn = h("button", "btn", "← prev");
+  prevBtn.disabled = navList.length < 2;
+  prevBtn.addEventListener("click", () => auditNav(-1));
+  const nextBtn = h("button", "btn", "next →");
+  nextBtn.disabled = navList.length < 2;
+  nextBtn.addEventListener("click", () => auditNav(1));
+  const navCam = navIdx >= 0 && navList[navIdx].source_extra ? navList[navIdx].source_extra.camera : null;
+  const navBtns = h("div", "detail-nav-btns");
+  navBtns.appendChild(prevBtn);
+  navBtns.appendChild(nextBtn);
+  const closeNav = h("button", "btn", "close");
+  closeNav.addEventListener("click", () => {
+    auditState.detailId = null;
+    const p = document.querySelector("#view-audit .detail-panel");
+    if (p) p.remove();
+    refreshAuditButtons(null);
+  });
+  navBtns.appendChild(closeNav);
+  nav.appendChild(navBtns);
+  nav.appendChild(h("span", "detail-nav-info",
+    navIdx >= 0 ? `sample ${navIdx + 1} of ${navList.length}${navCam ? " · " + esc(navCam) : ""}` : ""));
+  panel.appendChild(nav);
+
+  const d = det.decision || {};
+  const prov = det.provenance || {};
+  const source = prov.source || {};
+  const sam = prov.sam || {};
+  const geometry = prov.geometry || {};
+  const vlm = prov.vlm || {};
+  const samFailed = d.reason === "sam_failure";
+
+  const head = h("div", "detail-head");
+  head.appendChild(h("h2", null, `audit ${esc(sampleId)}`));
+  head.appendChild(pillNode(d.status || "—", auditPillClass(d.status)));
+  head.appendChild(pillNode(d.reason || "ok", "ignored"));
+  for (const cond of d.failing_conditions || []) {
+    head.appendChild(pillNode("✗ " + cond, "fail"));
+  }
+  if (det.override) head.appendChild(pillNode("override → " + det.override.status, "warn"));
+  panel.appendChild(head);
+
+  const failing = d.failing_conditions || [];
+  const labelsWrap = h("div", "detail-labels");
+  labelsWrap.appendChild(labelBadge("frigate", source.class_name || "—"));
+  labelsWrap.appendChild(labelBadge("sam", samFailed ? "failed" : (sam.class_name || "—"), samFailed ? "fail" : ""));
+  if (det.vlm_error) {
+    labelsWrap.appendChild(labelBadge("vlm", "error", "fail"));
+  } else if (!det.has_vlm) {
+    labelsWrap.appendChild(labelBadge("vlm", "not reached", ""));
+  } else {
+    const vlmLabel = vlm.class_label || "";
+    labelsWrap.appendChild(labelBadge("vlm", vlmLabel ? vlmLabel : "no object", vlmLabel ? "ok" : "warn"));
+  }
+  const pendingDec = !d.status || String(d.status) === "PENDING";
+  const agreeOk = !pendingDec && !failing.includes("class_mismatch");
+  labelsWrap.appendChild(labelBadge(
+    "sam ❯ vlm",
+    pendingDec ? "pending" : (agreeOk ? "agree" : "mismatch"),
+    pendingDec ? "" : (agreeOk ? "ok" : "warn"),
+  ));
+  panel.appendChild(labelsWrap);
+
+  const imgs = h("div", "detail-imgs");
+  if (det.artifacts && det.artifacts.reconciliation) {
+    const fig = h("div", "audit-figure");
+    const img = document.createElement("img");
+    img.src = det.artifacts.reconciliation;
+    img.alt = "reconciliation";
+    fig.appendChild(img);
+    fig.appendChild(h("div", "audit-caption",
+      "reconciliation overlay — green = Frigate box, blue = SAM box, red = SAM mask."));
+    imgs.appendChild(fig);
+  } else {
+    imgs.appendChild(h("div", "placeholder", "no reconciliation image (SAM failed before rendering)"));
+  }
+  if (det.artifacts && det.artifacts.vlm) {
+    const fig = h("div", "audit-figure");
+    const img = document.createElement("img");
+    img.src = det.artifacts.vlm;
+    img.alt = "VLM input";
+    fig.appendChild(img);
+    fig.appendChild(h("div", "audit-caption",
+      "blind VLM input — exactly what the VLM saw: the crop with only the Frigate box, no labels."));
+    imgs.appendChild(fig);
+  }
+  if (det.artifacts && det.artifacts.mask) {
+    const fig = h("div", "audit-figure");
+    const img = document.createElement("img");
+    img.src = det.artifacts.mask;
+    img.alt = "SAM mask";
+    fig.appendChild(img);
+    fig.appendChild(h("div", "audit-caption", "SAM binary mask (crop space)"));
+    imgs.appendChild(fig);
+  }
+  panel.appendChild(imgs);
+
+  const ovr = det.override || null;
+  const ovrSection = h("div", "detail-override");
+  ovrSection.appendChild(h("h2", "card-title", "Human override"));
+  ovrSection.appendChild(h("div", "status-line", ovr
+    ? `effective ${esc(ovr.status)} · ${esc(ovr.note || "no note")}${d.pipeline_status ? " · pipeline was " + esc(d.pipeline_status) : ""}`
+    : `pipeline verdict ${esc(d.status || "—")}${d.reason ? " (" + esc(d.reason) + ")" : ""}`));
+  const noteInput = document.createElement("input");
+  noteInput.className = "override-note";
+  noteInput.placeholder = "note (optional)";
+  if (ovr && ovr.note) noteInput.value = ovr.note;
+  const ovrBtns = h("div", "detail-nav-btns");
+  const keepBtn = h("button", "btn", "force KEEP");
+  keepBtn.addEventListener("click", () => setAuditOverride(sampleId, "KEEP", noteInput));
+  const dropBtn = h("button", "btn", "force DROP");
+  dropBtn.addEventListener("click", () => setAuditOverride(sampleId, "DROP", noteInput));
+  ovrBtns.appendChild(keepBtn);
+  ovrBtns.appendChild(dropBtn);
+  if (ovr) {
+    const clearBtn = h("button", "btn", "remove override");
+    clearBtn.addEventListener("click", () => {
+      api("/api/audit/overrides/" + encodeURIComponent(sampleId), { method: "DELETE" })
+        .then(() => render("audit"))
+        .catch((e) => errorBox(ovrSection, e.message));
+    });
+    ovrBtns.appendChild(clearBtn);
+  }
+  ovrSection.appendChild(noteInput);
+  ovrSection.appendChild(ovrBtns);
+  panel.appendChild(ovrSection);
+
+  const sourceMeta = [
+    ["sample id", sampleId],
+    ["hash", (prov.sample_hash || "").slice(0, 12)],
+    ["class", `${source.class_name || "—"}${source.class_id !== null && source.class_id !== undefined ? " · id " + source.class_id : ""}`],
+    ["source box", Array.isArray(source.bbox) ? source.bbox.map((v) => num(v)).join(", ") : "—"],
+    ...Object.entries(d.source_extra || {}).map(([k, v]) => [k, typeof v === "object" ? "…" : String(v)]),
+  ];
+  const meta = det.meta || {};
+  panel.appendChild(renderKvSection("Source", sourceMeta));
+  panel.appendChild(renderKvSection("Models", [
+    ["sam key", meta.sam_key || "—"],
+    ["vlm key", meta.vlm_key || "—"],
+    ["pipeline version", num(meta.pipeline_version, 0) || "—"],
+  ]));
+  panel.appendChild(renderKvSection("SAM result", samFailed ? [
+    ["stage", "failed (sam_failure)"],
+    ["result", "no mask, no box — sample dropped before geometry/VLM"],
+  ] : [
+    ["hypothesis", sam.class_name || "—"],
+    ["confidence", num(sam.confidence, 3)],
+    ["refined box", Array.isArray(sam.bbox) ? sam.bbox.map((v) => num(v)).join(", ") : "—"],
+    ["mask area (px)", num(sam.mask_area, 0)],
+  ]));
+  panel.appendChild(renderKvSection("Geometry", [
+    ["bbox IoU", num(geometry.bbox_iou, 3)],
+    ["mask / box ratio", num(geometry.mask_bbox_ratio, 3)],
+    ["mask in Frigate box", num(geometry.mask_frigate_containment, 3)],
+    ["mask in SAM box", num(geometry.mask_sam_containment, 3)],
+    ["Frigate box area", num(geometry.frigate_bbox_area, 0)],
+    ["SAM box area", num(geometry.sam_bbox_area, 0)],
+    ["edge deltas L/T/R/B",
+      ["left_delta", "top_delta", "right_delta", "bottom_delta"]
+        .map((k) => num(geometry.edge_deltas && geometry.edge_deltas[k], 1))
+        .join(" / ") || "—"],
+  ]));
+
+  const checkBox = h("div", "audit-check-list");
+  if (det.vlm_error) {
+    checkBox.appendChild(h("div", "audit-error", "VLM error: " + det.vlm_error));
+  } else if (!det.has_vlm) {
+    checkBox.appendChild(h("div", "placeholder",
+      "VLM never reached — an earlier stage (SAM) failed, so no independent verdict exists"));
+  } else {
+    const failing = d.failing_conditions || [];
+    const presentOk = !failing.includes("object_present");
+    const presentRow = h("div", "audit-check " + (presentOk ? "check-ok" : "check-fail"));
+    presentRow.appendChild(h("span", null, "object present" + (vlm.class_label ? " · VLM sees " + esc(vlm.class_label) : "")));
+    presentRow.appendChild(pillNode(presentOk ? "✓ pass" : "✗ fail", presentOk ? "pass" : "fail"));
+    checkBox.appendChild(presentRow);
+    for (const [key, label] of AUDIT_CHECKS) {
+      const val = vlm[key];
+      const row = h("div", "audit-check " + (val ? "check-ok" : "check-fail"));
+      row.appendChild(h("span", null, label));
+      row.appendChild(pillNode(val ? "✓ pass" : "✗ fail", val ? "pass" : "fail"));
+      checkBox.appendChild(row);
+    }
+    const agreeOk = !failing.includes("class_mismatch");
+    const agreeRow = h("div", "audit-check " + (agreeOk ? "check-ok" : "check-fail"));
+    agreeRow.appendChild(h("span", null, "SAM & VLM class agree (independent)"));
+    agreeRow.appendChild(pillNode(agreeOk ? "✓ pass" : "✗ fail", agreeOk ? "pass" : "fail"));
+    checkBox.appendChild(agreeRow);
+  }
+  const decisionBox = renderKvSection("Decision", [
+    ["status", d.status || "—"],
+    ["reason", d.reason || "none (all stages agreed)"],
+    ["training label", d.training_label || "—"],
+    ["bbox source", d.bbox_source || "—"],
+    ["mask source", d.mask_source || "—"],
+    ["failing conditions", (d.failing_conditions || []).join(", ") || "none"],
+  ]);
+  const right = h("div", "detail-right");
+  right.appendChild(h("h2", "card-title", "VLM independent verdict"));
+  right.appendChild(checkBox);
+  right.appendChild(decisionBox);
+  panel.appendChild(right);
+  const prevPanel = sec.querySelector(".detail-panel");
+  if (prevPanel) prevPanel.remove();
+  const tableEl = sec.querySelector("table");
+  if (tableEl) sec.insertBefore(panel, tableEl);
+  else sec.appendChild(panel);
+}
+
+function renderKvSection(title, pairs) {
+  const wrap = h("div", "kv-section");
+  wrap.appendChild(h("h3", "card-title", title));
+  const grid = h("div", "kv-grid");
+  for (const [k, v] of pairs) {
+    grid.appendChild(h("div", "k", k));
+    grid.appendChild(h("div", "v", v === null || v === undefined || v === "" ? "—" : String(v)));
+  }
+  wrap.appendChild(grid);
+  return wrap;
+}
+
 async function renderDatasets(sec) {
   const data = await api("/api/datasets");
   sec.innerHTML = "";
@@ -705,7 +1255,6 @@ async function renderDatasets(sec) {
 const trainingState = { run: "", showTable: false };
 
 async function renderTraining(sec) {
-  clearCharts();
   const listData = await api("/api/training/list");
   sec.innerHTML = "";
   const runs = listData.runs || [];
@@ -799,11 +1348,11 @@ async function renderTrainingDetail(sec, run) {
     rec.push((r === null || r === undefined || r === "" || !Number.isFinite(Number(r))) ? null : Number(r));
   }
   const series = [
-    { label: "mAP50", color: "#56c7ff", data: map },
-    { label: "recall", color: "#56d364", data: rec },
+    { label: "mAP50", color: "var(--blue)", data: map },
+    { label: "recall", color: "var(--lime)", data: rec },
   ];
-  if (beforeMap50 !== null) series.push({ label: "golden before", color: "#8b949e", width: 1, dash: [6, 4], data: xs.map(() => beforeMap50) });
-  if (afterMap50 !== null) series.push({ label: "golden after", color: "#d29922", width: 1, dash: [6, 4], data: xs.map(() => afterMap50) });
+  if (beforeMap50 !== null) series.push({ label: "golden before", color: "var(--muted)", width: 1, dash: [6, 4], data: xs.map(() => beforeMap50) });
+  if (afterMap50 !== null) series.push({ label: "golden after", color: "var(--amber)", width: 1, dash: [6, 4], data: xs.map(() => afterMap50) });
   renderLineChart(plotBox(sec), xs, series);
   return data;
 }
@@ -1139,9 +1688,17 @@ async function pollJobs() {
     if (running && currentView === "overview" && views.overview.loaded) {
       render("overview");
     }
+    if (currentView === "audit" && views.audit.loaded) {
+      try {
+        const probe = await api("/api/audit?limit=1");
+        if (probe.updated_at !== auditState.updatedAt) render("audit");
+      } catch (e) {}
+    }
     if (becameIdle) {
       views.benchmark.stale = true;
       views.quality.stale = true;
+      views.audit.stale = true;
+      views.datasets.stale = true;
       if (drawerJobId) renderJobDrawer(drawerJobId);
       if (views[currentView] && views[currentView].loaded) render(currentView);
     }

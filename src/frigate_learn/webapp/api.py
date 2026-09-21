@@ -1,9 +1,10 @@
 from __future__ import annotations
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
+from ..audit.overrides import OverrideError
 from ..inspect.triage import set_sample_quality, validate_quality
 from . import queries
 from .jobs import JobManager, JobRunningError
@@ -17,6 +18,11 @@ class JobRunRequest(BaseModel):
 
 class QualityRequest(BaseModel):
     quality: str
+
+
+class AuditOverrideRequest(BaseModel):
+    status: str
+    note: str = ""
 
 
 def register_routes(app: FastAPI) -> None:
@@ -43,6 +49,60 @@ def register_routes(app: FastAPI) -> None:
     @app.get("/api/quality")
     def quality() -> dict:
         return queries.quality_counts(db)
+
+    @app.get("/api/audit")
+    def audit(
+        status: str | None = None,
+        label: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict:
+        return queries.audit_index(
+            config, status=status, label=label, limit=limit, offset=offset,
+        )
+
+    @app.get("/api/audit/overrides")
+    def audit_overrides() -> dict:
+        return {
+            "root": str(config.resolve(config.audit.output)),
+            "overrides": queries.audit_overrides(config),
+        }
+
+    @app.put("/api/audit/overrides/{sample_id}")
+    def audit_override_put(sample_id: str, body: AuditOverrideRequest) -> dict:
+        try:
+            entry = queries.set_audit_override(
+                config, sample_id, body.status.strip().upper(), body.note,
+            )
+        except OverrideError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        return {"sample_id": sample_id, "override": entry}
+
+    @app.delete("/api/audit/overrides/{sample_id}")
+    def audit_override_delete(sample_id: str) -> dict:
+        return {
+            "sample_id": sample_id,
+            "removed": queries.remove_audit_override(config, sample_id),
+        }
+
+    @app.get("/api/audit/{sample_id}", response_model=None)
+    def audit_sample(sample_id: str):
+        result = queries.audit_sample(config, sample_id)
+        if result is None:
+            return JSONResponse({"detail": "unknown audit sample"}, status_code=404)
+        return result
+
+    @app.get("/audit-images/{sample_id}/{kind}", response_model=None)
+    def audit_image(sample_id: str, kind: str):
+        path = queries.audit_image_path(config, sample_id, kind)
+        if path is None:
+            return JSONResponse({"error": "not found"}, status_code=404)
+        data = path.read_bytes()
+        return Response(
+            content=data,
+            media_type="image/png",
+            headers={"Content-Length": str(len(data))},
+        )
 
     @app.get("/api/datasets")
     def datasets() -> dict:

@@ -131,7 +131,8 @@ launch pipeline stages, and triage samples from the browser — no shell needed.
 .venv/bin/frigate-learn web --host 127.0.0.1 --port 8080
 ```
 
-The SPA has no build step (plain HTML/JS with a vendored uPlot) and six views:
+The SPA has no build step (plain HTML/JS) and seven
+views:
 
 - **Overview** — headline counts (samples, cameras, disk free, VLM status),
   quality verdict totals, next build version, recent `jobs`, and the
@@ -141,6 +142,11 @@ The SPA has no build step (plain HTML/JS with a vendored uPlot) and six views:
 - **Quality** — verdict totals, Frigate-review counts (human-confirmed vs
   not), verified boxes per class, and the review backlog of unverified
   samples.
+- **Audit** — SAM + VLM reconciliation view: the decision funnel
+  (candidates → SAM ok → VLM verdict → KEEP), per-class accept/drop/pending
+  bars, the per-sample verdict table (filterable by status/class), and a
+  detail panel with the reconciliation image the VLM judged, SAM hypothesis,
+  geometry metrics, and the six VLM booleans with failing conditions.
 - **Datasets** — dataset version table (train/val splits, verified counts) and
   golden-dataset status.
 - **Training** — pick a training run: best/latest mAP50, weights presence, and
@@ -295,11 +301,11 @@ src/frigate_learn/
 │   └── hailo.py           # P12: ONNX export + HEF compile + Frigate detector YAML
 └── webapp/                # local control-panel dashboard (`frigate-learn web`)
     ├── app.py             # FastAPI app factory + static mount
-    ├── api.py             # HTTP surface: 16 endpoints under /api/*
+    ├── api.py             # HTTP surface: 22 endpoints under /api/*
     ├── queries.py         # read-side queries (overview, benchmark, datasets, …)
     ├── serving.py         # image/thumb resolution + on-demand thumbnail cache
     ├── jobs.py            # JobManager: pipeline stages in a background thread (jobs ledger)
-    └── static/            # no-build SPA: index.html, app.js, styles.css, vendor/uPlot
+    └── static/            # no-build SPA: index.html, app.js, styles.css
 ```
 
 ## Design rules

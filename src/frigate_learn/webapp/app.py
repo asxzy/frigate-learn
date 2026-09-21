@@ -24,6 +24,13 @@ def create_app(config: AppConfig | None = None) -> FastAPI:
     app.state.config = config
     app.state.db = db
     app.state.jobs = JobManager(config, db)
+
+    @app.middleware("http")
+    async def no_store_cache(request, call_next):
+        response = await call_next(request)
+        response.headers.setdefault("Cache-Control", "no-store")
+        return response
+
     api.register_routes(app)
     static_dir = Path(__file__).parent / "static"
     app.mount("/", StaticFiles(directory=static_dir, html=True), name="static")

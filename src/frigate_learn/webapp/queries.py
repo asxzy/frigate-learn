@@ -10,11 +10,17 @@ import csv
 import json
 import math
 import shutil
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlalchemy import func
 
+from ..audit.overrides import (
+    OverrideError,
+    load_overrides,
+    remove_override,
+    save_override,
+)
 from ..dataset.yolo import read_yolo_label
 from ..evaluation.benchmark import pareto_frontier, results_from_json
 from ..evaluation.golden import GoldenDataset
@@ -26,6 +32,11 @@ BENCHMARK_FILE = "benchmark-results.json"
 TRAINING_DIR = "training"
 MAP50_KEY = "metrics/mAP50(B)"
 MAX_LIMIT = 200
+AUDIT_IMAGE_FILES = {
+    "reconciliation": "reconciliation.png",
+    "vlm": "vlm.png",
+    "mask": "mask.png",
+}
 
 
 def overview(config, db) -> dict:
@@ -507,14 +518,329 @@ def _box(coords: list[float | None]) -> list[float] | None:
     return [float(c) for c in coords]
 
 
+def audit_index(
+    config,
+    *,
+    status: str | None = None,
+    label: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict:
+    limit = max(1, min(MAX_LIMIT, int(limit)))
+    offset = max(0, int(offset))
+    root = config.resolve(config.audit.output)
+    entries: list[dict] = []
+    labels: set[str] = set()
+    updated_at: str | None = None
+    if root.is_dir():
+        for path in sorted(root.glob("*/decision.json")):
+            entry = _parse_audit_decision(path)
+            if entry is None:
+                continue
+            entries.append(entry)
+            if entry["frigate_label"]:
+                labels.add(entry["frigate_label"])
+            mtime = path.stat().st_mtime
+            if updated_at is None or mtime > updated_at:
+                updated_at = mtime
+    overrides = load_overrides(root)
+    entries = [
+        _apply_override_entry(e, overrides.get(e["sample_id"]))
+        for e in entries
+    ]
+    filtered = [e for e in entries if _audit_matches(e, status=status, label=label)]
+    stats = _audit_aggregate(entries, config)
+    return {
+        "root": str(root),
+        "exists": root.is_dir(),
+        "pipeline_version": config.audit.pipeline_version,
+        "updated_at": (
+            datetime.fromtimestamp(updated_at, tz=timezone.utc).isoformat()
+            if updated_at is not None
+            else None
+        ),
+        "stats": stats,
+        "labels": sorted(labels),
+        "total": len(filtered),
+        "limit": limit,
+        "offset": offset,
+        "samples": [
+            _audit_sample_item(e, root) for e in filtered[offset : offset + limit]
+        ],
+    }
+
+
+def audit_sample(config, sample_id: str) -> dict | None:
+    root = config.resolve(config.audit.output)
+    sample_dir = _audit_sample_dir(root, sample_id)
+    if sample_dir is None:
+        return None
+    entry = _parse_audit_decision(sample_dir / "decision.json")
+    if entry is None:
+        return None
+    override = load_overrides(root).get(sample_id)
+    if override:
+        entry = _apply_override_entry(entry, override)
+    payload = json.loads((sample_dir / "decision.json").read_text(encoding="utf-8"))
+    provenance = payload.get("provenance") or {}
+    sam_block = provenance.get("sam") or {}
+    vlm_block = provenance.get("vlm") or {}
+    has_sam = bool(sam_block.get("class_name"))
+    vlm_error = (
+        vlm_block.get("error")
+        if isinstance(vlm_block, dict) and vlm_block.get("error") not in (None, "sam")
+        else None
+    )
+    has_vlm = isinstance(vlm_block, dict) and (
+        "bbox_covers_object" in vlm_block or "class_label" in vlm_block
+    )
+    artifacts = {"reconciliation": None, "vlm": None, "mask": None}
+    if (sample_dir / "reconciliation.png").is_file():
+        artifacts["reconciliation"] = (
+            f"/audit-images/{sample_id}/reconciliation"
+        )
+    if (sample_dir / "vlm.png").is_file():
+        artifacts["vlm"] = f"/audit-images/{sample_id}/vlm"
+    if (sample_dir / "mask.png").is_file():
+        artifacts["mask"] = f"/audit-images/{sample_id}/mask"
+    return {
+        "sample_id": sample_id,
+        "meta": payload.get("meta") or {},
+        "decision": entry,
+        "override": override,
+        "pipeline_status": entry.get("pipeline_status"),
+        "provenance": provenance,
+        "has_sam": has_sam,
+        "has_vlm": has_vlm,
+        "vlm_error": vlm_error,
+        "artifacts": artifacts,
+    }
+
+
+def audit_image_path(config, sample_id: str, kind: str) -> Path | None:
+    filename = AUDIT_IMAGE_FILES.get(kind)
+    if filename is None:
+        return None
+    sample_dir = _audit_sample_dir(config.resolve(config.audit.output), sample_id)
+    if sample_dir is None:
+        return None
+    path = sample_dir / filename
+    return path if path.is_file() else None
+
+
+def _audit_sample_dir(root: Path, sample_id: str) -> Path | None:
+    if (
+        not sample_id
+        or sample_id in (".", "..")
+        or "/" in sample_id
+        or "\\" in sample_id
+    ):
+        return None
+    try:
+        candidate = (root / sample_id).resolve()
+        candidate.relative_to(root.resolve())
+    except (OSError, ValueError):
+        return None
+    return candidate if candidate.is_dir() else None
+
+
+def _parse_audit_decision(path: Path) -> dict | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    decision = payload.get("decision")
+    if not isinstance(decision, dict):
+        return None
+    provenance = payload.get("provenance")
+    if not isinstance(provenance, dict):
+        provenance = {}
+    return {
+        "sample_id": path.parent.name,
+        "status": str(decision.get("status") or ""),
+        "reason": decision.get("reason"),
+        "frigate_label": str(
+            (provenance.get("source") or {}).get("class_name")
+            or decision.get("frigate_label")
+            or ""
+        ),
+        "sam_class": decision.get("sam_class"),
+        "training_label": decision.get("training_label"),
+        "bbox_source": decision.get("bbox_source"),
+        "mask_source": decision.get("mask_source"),
+        "failing_conditions": list(decision.get("failing_conditions") or []),
+        "source_extra": _audit_source_extra(provenance.get("source") or {}),
+        "sam": provenance.get("sam") or {},
+        "geometry": provenance.get("geometry"),
+        "vlm": provenance.get("vlm") or {},
+        "decision": decision,
+    }
+
+
+_SOURCE_FIXED_KEYS = {"type", "class_name", "class_id", "bbox", "extra"}
+
+
+def _audit_source_extra(source: dict) -> dict:
+    extra = {k: v for k, v in source.items() if k not in _SOURCE_FIXED_KEYS}
+    nested = source.get("extra")
+    if isinstance(nested, dict):
+        extra.update(nested)
+    return extra
+
+
+def _audit_matches(entry: dict, *, status: str | None, label: str | None) -> bool:
+    return (not status or entry["status"] == status) and (
+        not label or entry["frigate_label"] == label
+    )
+
+
+def _apply_override_entry(entry: dict, override: dict | None) -> dict:
+    if not override or override.get("status") not in ("KEEP", "DROP"):
+        return entry
+    updated = dict(entry)
+    updated["pipeline_status"] = updated["status"]
+    updated["status"] = override["status"]
+    updated["override"] = override
+    return updated
+
+
+def audit_overrides(config) -> dict:
+    return load_overrides(config.resolve(config.audit.output))
+
+
+def set_audit_override(config, sample_id: str, status: str, note: str = "") -> dict:
+    root = config.resolve(config.audit.output)
+    if _audit_sample_dir(root, sample_id) is None:
+        raise OverrideError("unknown audit sample")
+    return save_override(root, sample_id, status, note)
+
+
+def remove_audit_override(config, sample_id: str) -> bool:
+    return remove_override(config.resolve(config.audit.output), sample_id)
+
+
+def _audit_aggregate(entries: list[dict], config) -> dict:
+    accepted = 0
+    dropped = 0
+    pending = 0
+    agreements = 0
+    disagreements = 0
+    sam_ok = 0
+    sam_fail = 0
+    vlm_calls = 0
+    vlm_fail = 0
+    vlm_transport = 0
+    by_class: dict[str, dict[str, int]] = {}
+    for entry in entries:
+        label = entry["frigate_label"] or "unknown"
+        cs = by_class.setdefault(
+            label,
+            {
+                "processed": 0,
+                "accepted": 0,
+                "dropped": 0,
+                "pending": 0,
+                "sam_fail": 0,
+                "vlm_fail": 0,
+            },
+        )
+        status = entry["status"]
+        reason = entry["reason"]
+        if status == "KEEP":
+            accepted += 1
+            agreements += 1
+            sam_ok += 1
+            vlm_calls += 1
+            cs["processed"] += 1
+            cs["accepted"] += 1
+        elif status == "PENDING":
+            pending += 1
+            sam_ok += 1
+            vlm_transport += 1
+            cs["processed"] += 1
+            cs["pending"] += 1
+        else:
+            dropped += 1
+            disagreements += 1
+            if entry["sam"].get("class_name"):
+                sam_ok += 1
+            if reason in ("vlm_failure", "vlm_malformed"):
+                vlm_fail += 1
+                cs["vlm_fail"] += 1
+            elif reason and "vlm" in reason:
+                vlm_calls += 1
+            if reason == "sam_failure":
+                sam_fail += 1
+                cs["sam_fail"] += 1
+            cs["processed"] += 1
+            cs["dropped"] += 1
+    total = len(entries)
+    by_class = {k: dict(v) for k, v in sorted(by_class.items())}
+    return {
+        "total": total,
+        "processed": total,
+        "cached_skipped": 0,
+        "image_fail": 0,
+        "sam_ok": sam_ok,
+        "sam_fail": sam_fail,
+        "vlm_calls": vlm_calls,
+        "vlm_fail": vlm_fail,
+        "vlm_transport": vlm_transport,
+        "agreements": agreements,
+        "disagreements": disagreements,
+        "accepted": accepted,
+        "dropped": dropped,
+        "pending": pending,
+        "hard_negatives_written": _export_count(
+            config, "hard_negative", "images"
+        ),
+        "positives_written": _export_count(config, "positive", "images"),
+        "acceptance_rate": round(accepted / total, 4) if total else 0.0,
+        "by_class": by_class,
+    }
+
+
+def _export_count(config, group: str, subdir: str) -> int:
+    root = config.resolve(config.audit.training) / group / subdir
+    if not root.is_dir():
+        return 0
+    return len([f for f in root.iterdir() if f.is_file()])
+
+
+def _audit_sample_item(entry: dict, root: Path) -> dict:
+    sample_dir = root / entry["sample_id"]
+    return {
+        "sample_id": entry["sample_id"],
+        "status": entry["status"],
+        "reason": entry["reason"],
+        "frigate_label": entry["frigate_label"],
+        "sam_class": entry["sam_class"],
+        "training_label": entry["training_label"],
+        "failing_conditions": entry["failing_conditions"],
+        "source_extra": entry["source_extra"],
+        "override": entry.get("override"),
+        "pipeline_status": entry.get("pipeline_status"),
+        "has_reconciliation": (sample_dir / "reconciliation.png").is_file(),
+        "has_mask": (sample_dir / "mask.png").is_file(),
+    }
+
+
 __all__ = [
-    "overview",
+    "audit_image_path",
+    "audit_index",
+    "audit_overrides",
+    "audit_sample",
     "benchmark",
-    "deployments",
-    "quality_counts",
     "datasets",
+    "deployments",
+    "overview",
+    "quality_counts",
+    "remove_audit_override",
+    "sample_detail",
+    "samples",
+    "set_audit_override",
     "training_index",
     "training_run",
-    "samples",
-    "sample_detail",
 ]

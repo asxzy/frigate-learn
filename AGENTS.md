@@ -16,8 +16,8 @@ control panel.
   external import, deployment gate (vs. baseline, `deployments` ledger), Hailo
   deploy (ONNX → HEF), and the `frigate-learn run` orchestrator.
 - **Webapp (`frigate-learn web`):** FastAPI backend (`webapp/{app,api,queries,
-  serving,jobs}.py`) + no-build vanilla-JS SPA (`webapp/static/`, vendored
-  uPlot). 22 endpoints under `/api/*`, seven views (Overview, Benchmark,
+  serving,jobs}.py`) + no-build vanilla-JS SPA (`webapp/static/`). 22 endpoints
+  under `/api/*`, seven views (Overview, Benchmark,
   Quality, Audit, Datasets, Training, Triage lightbox), pipeline stages run
   in a background daemon thread (`jobs.py` JobManager, single job at a time,
   `jobs` SQLite ledger, bounded log tail). Localhost-only, no auth/CORS.
@@ -38,9 +38,8 @@ control panel.
 ## Conventions
 
 - **No comments in code.** The repo generically uses `# ---` section banners,
-  but the webapp directive is strict: zero comments in Python/JS/HTML/CSS
-  (vendored uPlot license header excepted). Do not add comments anywhere in
-  `webapp/` or `static/`.
+  but the webapp directive is strict: zero comments in Python/JS/HTML/CSS.
+  Do not add comments anywhere in `webapp/` or `static/`.
 - **CLI is click** (`cli.py`), subcommands: collect, inspect, triage, verify,
   discover, dataset, import-coco, benchmark, train, gate, deploy, run, status,
   db, web, audit (`audit-dataset` is an alias for `audit run`; dataset audit /

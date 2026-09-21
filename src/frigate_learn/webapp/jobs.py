@@ -60,6 +60,7 @@ class JobManager:
             session.execute(
                 update(Job)
                 .where(Job.status == "running")
+                .where(Job.type == "pipeline")
                 .values(status="failed", error=_STALE_ERROR)
             )
             session.commit()
@@ -135,6 +136,23 @@ class JobManager:
             self._tail.append(line)
             if len(self._tail) > _LOG_TAIL_CAP:
                 del self._tail[: len(self._tail) - _LOG_TAIL_CAP]
+            tail = list(self._tail)
+        try:
+            with self.db.session() as session:
+                job = session.get(Job, self._job_id)
+                if job is None:
+                    return
+                try:
+                    meta = json.loads(job.metadata_json) if job.metadata_json else {}
+                except (ValueError, TypeError):
+                    meta = {}
+                if not isinstance(meta, dict):
+                    meta = {}
+                meta["log_tail"] = tail
+                job.metadata_json = json.dumps(meta)
+                session.commit()
+        except Exception:
+            pass
 
     def current_job_id(self) -> str | None:
         if self._thread and self._thread.is_alive():

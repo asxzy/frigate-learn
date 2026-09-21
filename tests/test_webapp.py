@@ -59,17 +59,18 @@ STATIC_DIR = Path(webapp_pkg.__file__).parent / "static"
 def test_index_html_references_app_scripts():
     index = (STATIC_DIR / "index.html").read_text(encoding="utf-8")
     assert "/app.js" in index
-    assert "/vendor/uPlot.iife.min.js" in index
+    assert "/styles.css" in index
+    assert "uPlot" not in index
 
 
 def test_spa_static_files_exist():
     assert (STATIC_DIR / "app.js").is_file()
     assert (STATIC_DIR / "styles.css").is_file()
-    uplot = STATIC_DIR / "vendor" / "uPlot.iife.min.js"
-    assert uplot.is_file()
-    assert uplot.stat().st_size > 1024
-    header = uplot.read_bytes()[:256]
-    assert b"uPlot" in header
+    app = (STATIC_DIR / "app.js").read_text(encoding="utf-8")
+    assert "renderLineChart" in app
+    assert "renderScatter" in app
+    assert "uPlot" not in app
+    assert "<svg" in app
 
 
 REAL_CSV_HEADER = (
@@ -1368,3 +1369,328 @@ def test_api_samples_quality_malformed_json(tmp_path, monkeypatch):
         headers={"content-type": "application/json"},
     )
     assert r.status_code == 422
+
+# --- Audit (SAM + VLM reconciliation) view ---
+
+
+def _write_audit_decision(root, sample_id, status, *, reason=None, label="person", sam=True, vlm=None, failing=None):
+    sample_dir = root / sample_id
+    sample_dir.mkdir(parents=True, exist_ok=True)
+    sam_block = (
+        {"class_name": label, "bbox": [1.0, 1.0, 9.0, 9.0], "confidence": 0.9, "mask_area": 40}
+        if sam
+        else {"class_name": None, "bbox": None, "confidence": None}
+    )
+    if vlm is None:
+        vlm_block = (
+            {"bbox_covers_object": True, "class_label": label}
+            if status == "KEEP"
+            else {"error": "transport"}
+        )
+    else:
+        vlm_block = vlm
+    decision = {
+        "status": status,
+        "reason": reason,
+        "frigate_label": label,
+        "sam_class": label if sam else None,
+        "training_label": label if status == "KEEP" else None,
+        "bbox_source": "sam" if status == "KEEP" else None,
+        "mask_source": "sam" if status == "KEEP" else None,
+        "failing_conditions": failing or [],
+    }
+    payload = {
+        "meta": {
+            "hash": "h-" + sample_id,
+            "sam_key": "sam1",
+            "vlm_key": "vlm1",
+            "pipeline_version": 1,
+        },
+        "decision": decision,
+        "provenance": {
+            "sample_id": sample_id,
+            "sample_hash": "h-" + sample_id,
+            "source": {
+                "type": "frigate",
+                "class_name": label,
+                "class_id": 0,
+                "bbox": [0.0, 0.0, 10.0, 10.0],
+                "camera": "front",
+                "timestamp": 1.0,
+                "event_id": "e" + sample_id,
+            },
+            "sam": sam_block,
+            "geometry": {
+                "bbox_iou": 0.8,
+                "edge_deltas": {"left_delta": 1.0, "top_delta": 1.0, "right_delta": -1.0, "bottom_delta": -1.0},
+                "mask_area": 40,
+                "mask_bbox_ratio": 0.5,
+                "mask_frigate_containment": 0.9,
+                "mask_sam_containment": 0.95,
+                "frigate_bbox_area": 100.0,
+                "sam_bbox_area": 64.0,
+            },
+            "vlm": vlm_block,
+            "decision": decision,
+        },
+    }
+    (sample_dir / "decision.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _seed_audit_tree(tmp_path):
+    root = tmp_path / "audit"
+    _write_audit_decision(root, "s1", "KEEP", label="person")
+    _write_audit_decision(
+        root, "s2", "DROP", reason="vlm_conditions", label="car",
+        vlm={"bbox_covers_object": True, "class_label": ""},
+        failing=["object_present"],
+    )
+    _write_audit_decision(root, "s3", "PENDING", reason="vlm_failure", label="person")
+    _write_audit_decision(
+        root, "s4", "DROP", reason="sam_failure", label="dog", sam=False,
+        vlm={"error": "sam"},
+    )
+    (root / "s1" / "reconciliation.png").write_bytes(b"RECON")
+    (root / "s1" / "mask.png").write_bytes(b"MASK")
+    training = tmp_path / "training_audit"
+    (training / "positive" / "images").mkdir(parents=True)
+    (training / "hard_negative" / "images").mkdir(parents=True)
+    (training / "positive" / "images" / "s1.jpg").write_bytes(b"POS")
+    (training / "hard_negative" / "images" / "hn.jpg").write_bytes(b"HN")
+
+
+def _audit_client(tmp_path):
+    cfg = build_config({"data": {"root": "data"}}, tmp_path)
+    return TestClient(create_app(cfg)), cfg
+
+
+def test_api_audit_empty(tmp_path):
+    c, _ = _audit_client(tmp_path)
+    r = c.get("/api/audit")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["exists"] is False
+    assert body["stats"] == {
+        "total": 0,
+        "processed": 0,
+        "cached_skipped": 0,
+        "image_fail": 0,
+        "sam_ok": 0,
+        "sam_fail": 0,
+        "vlm_calls": 0,
+        "vlm_fail": 0,
+        "vlm_transport": 0,
+        "agreements": 0,
+        "disagreements": 0,
+        "accepted": 0,
+        "dropped": 0,
+        "pending": 0,
+        "hard_negatives_written": 0,
+        "positives_written": 0,
+        "acceptance_rate": 0.0,
+        "by_class": {},
+    }
+    assert body["samples"] == []
+    assert body["labels"] == []
+    assert body["total"] == 0
+    assert body["updated_at"] is None
+    assert c.get("/api/audit/nope").status_code == 404
+    assert c.get("/audit-images/nope/reconciliation").status_code == 404
+    assert c.get("/audit-images/nope/mask").status_code == 404
+    assert c.get("/audit-images/nope/bogus").status_code == 404
+
+
+def test_api_audit_index_stats_and_filters(tmp_path):
+    _seed_audit_tree(tmp_path)
+    bad = tmp_path / "audit" / "bad"
+    bad.mkdir(parents=True)
+    (bad / "decision.json").write_text("{oops", encoding="utf-8")
+    c, _ = _audit_client(tmp_path)
+    r = c.get("/api/audit")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["exists"] is True
+    assert body["total"] == 4
+    assert body["labels"] == ["car", "dog", "person"]
+    stats = body["stats"]
+    assert stats["total"] == 4
+    assert stats["processed"] == 4
+    assert stats["sam_ok"] == 3
+    assert stats["sam_fail"] == 1
+    assert stats["vlm_calls"] == 2
+    assert stats["vlm_fail"] == 0
+    assert stats["vlm_transport"] == 1
+    assert stats["agreements"] == 1
+    assert stats["disagreements"] == 2
+    assert stats["accepted"] == 1
+    assert stats["dropped"] == 2
+    assert stats["pending"] == 1
+    assert stats["acceptance_rate"] == round(1 / 4, 4)
+    assert stats["positives_written"] == 1
+    assert stats["hard_negatives_written"] == 1
+    assert stats["by_class"]["person"] == {
+        "processed": 2, "accepted": 1, "dropped": 0, "pending": 1, "sam_fail": 0, "vlm_fail": 0,
+    }
+    assert stats["by_class"]["car"] == {
+        "processed": 1, "accepted": 0, "dropped": 1, "pending": 0, "sam_fail": 0, "vlm_fail": 0,
+    }
+    assert stats["by_class"]["dog"] == {
+        "processed": 1, "accepted": 0, "dropped": 1, "pending": 0, "sam_fail": 1, "vlm_fail": 0,
+    }
+    assert [s["sample_id"] for s in body["samples"]] == ["s1", "s2", "s3", "s4"]
+    s1 = body["samples"][0]
+    assert s1["status"] == "KEEP"
+    assert s1["frigate_label"] == "person"
+    assert s1["sam_class"] == "person"
+    assert s1["failing_conditions"] == []
+    assert s1["has_reconciliation"] is True
+    assert s1["has_mask"] is True
+    assert s1["source_extra"] == {"camera": "front", "timestamp": 1.0, "event_id": "es1"}
+    assert body["samples"][1]["has_reconciliation"] is False
+
+    by_status = c.get("/api/audit?status=DROP").json()
+    assert [s["sample_id"] for s in by_status["samples"]] == ["s2", "s4"]
+    assert by_status["total"] == 2
+    assert by_status["stats"]["total"] == 4
+    by_pending = c.get("/api/audit?status=PENDING").json()
+    assert [s["sample_id"] for s in by_pending["samples"]] == ["s3"]
+    by_label = c.get("/api/audit?label=person").json()
+    assert [s["sample_id"] for s in by_label["samples"]] == ["s1", "s3"]
+    paged = c.get("/api/audit?limit=2&offset=2").json()
+    assert [s["sample_id"] for s in paged["samples"]] == ["s3", "s4"]
+    assert paged["total"] == 4
+    no_match = c.get("/api/audit?label=bird").json()
+    assert no_match["total"] == 0
+    assert no_match["samples"] == []
+
+
+def test_api_audit_detail_and_images(tmp_path):
+    _seed_audit_tree(tmp_path)
+    c, _ = _audit_client(tmp_path)
+    r = c.get("/api/audit/s1")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["sample_id"] == "s1"
+    assert body["has_sam"] is True
+    assert body["has_vlm"] is True
+    assert body["vlm_error"] is None
+    assert body["decision"]["status"] == "KEEP"
+    assert body["decision"]["failing_conditions"] == []
+    assert body["decision"]["bbox_source"] == "sam"
+    assert body["decision"]["mask_source"] == "sam"
+    assert body["provenance"]["sam"]["mask_area"] == 40
+    assert body["provenance"]["geometry"]["bbox_iou"] == 0.8
+    assert body["provenance"]["source"]["camera"] == "front"
+    assert body["decision"]["source_extra"] == {"camera": "front", "timestamp": 1.0, "event_id": "es1"}
+    assert body["artifacts"] == {
+        "reconciliation": "/audit-images/s1/reconciliation",
+        "vlm": None,
+        "mask": "/audit-images/s1/mask",
+    }
+
+    s2 = c.get("/api/audit/s2").json()
+    assert s2["has_sam"] is True
+    assert s2["has_vlm"] is True
+    assert s2["vlm_error"] is None
+    assert s2["decision"]["reason"] == "vlm_conditions"
+    assert s2["decision"]["failing_conditions"] == ["object_present"]
+    assert s2["artifacts"] == {"reconciliation": None, "vlm": None, "mask": None}
+
+    s3 = c.get("/api/audit/s3").json()
+    assert s3["decision"]["status"] == "PENDING"
+    assert s3["vlm_error"] == "transport"
+
+    s4 = c.get("/api/audit/s4").json()
+    assert s4["has_sam"] is False
+    assert s4["has_vlm"] is False
+    assert s4["vlm_error"] is None
+    assert s4["decision"]["reason"] == "sam_failure"
+    assert s4["provenance"]["vlm"] == {"error": "sam"}
+
+    assert c.get("/api/audit/missing").status_code == 404
+
+    recon = c.get("/audit-images/s1/reconciliation")
+    assert recon.status_code == 200
+    assert recon.headers["content-type"] == "image/png"
+    assert int(recon.headers["content-length"]) == 5
+    assert recon.content == b"RECON"
+    mask = c.get("/audit-images/s1/mask")
+    assert mask.status_code == 200
+    assert mask.content == b"MASK"
+    assert c.get("/audit-images/s2/mask").status_code == 404
+    assert c.get("/audit-images/s4/reconciliation").status_code == 404
+
+
+def test_audit_image_path_traversal_guard(tmp_path):
+    _seed_audit_tree(tmp_path)
+    cfg = build_config({"data": {"root": "data"}}, tmp_path)
+    assert queries.audit_image_path(cfg, "s1", "reconciliation") is not None
+    assert queries.audit_image_path(cfg, "../s1", "reconciliation") is None
+    assert queries.audit_image_path(cfg, "..", "reconciliation") is None
+    assert queries.audit_image_path(cfg, "s1/../s1", "reconciliation") is None
+    assert queries.audit_image_path(cfg, "s1", "bogus") is None
+    assert queries.audit_sample(cfg, "s1")["sample_id"] == "s1"
+    assert queries.audit_sample(cfg, "./..") is None
+
+
+def test_audit_override_endpoints(tmp_path):
+    c, _ = _audit_client(tmp_path)
+    _seed_audit_tree(tmp_path)
+
+    idx = c.get("/api/audit").json()
+    assert idx["stats"]["accepted"] == 1
+    s2 = next(s for s in idx["samples"] if s["sample_id"] == "s2")
+    assert s2["status"] == "DROP" and s2.get("override") is None
+
+    r = c.put("/api/audit/overrides/s2", json={"status": "KEEP", "note": "looks fine"})
+    assert r.status_code == 200
+    assert r.json()["override"]["status"] == "KEEP"
+
+    idx = c.get("/api/audit").json()
+    s2 = next(s for s in idx["samples"] if s["sample_id"] == "s2")
+    assert s2["status"] == "KEEP"
+    assert s2["pipeline_status"] == "DROP"
+    assert s2["override"]["status"] == "KEEP"
+    assert idx["stats"]["accepted"] == 2
+    assert idx["stats"]["dropped"] == 1
+
+    keeps = c.get("/api/audit", params={"status": "KEEP"}).json()
+    assert any(s["sample_id"] == "s2" for s in keeps["samples"])
+
+    det = c.get("/api/audit/s2").json()
+    assert det["decision"]["status"] == "KEEP"
+    assert det["override"]["status"] == "KEEP"
+    assert det["pipeline_status"] == "DROP"
+
+    r = c.delete("/api/audit/overrides/s2")
+    assert r.json()["removed"] is True
+    idx = c.get("/api/audit").json()
+    s2 = next(s for s in idx["samples"] if s["sample_id"] == "s2")
+    assert s2["status"] == "DROP" and s2.get("override") is None
+
+    r = c.put("/api/audit/overrides/s2", json={"status": "bogus"})
+    assert r.status_code == 400
+
+
+def test_audit_override_invalid_sample_id(tmp_path):
+    c, _ = _audit_client(tmp_path)
+    _seed_audit_tree(tmp_path)
+    r = c.put("/api/audit/overrides/zzz", json={"status": "KEEP"})
+    assert r.status_code == 400
+
+
+def test_audit_source_extra_handles_nested_and_merged(tmp_path):
+    cfg = build_config({"data": {"root": "data"}}, tmp_path)
+    root = tmp_path / "audit"
+    _write_audit_decision(root, "n1", "KEEP", label="person")
+    decision_path = root / "n1" / "decision.json"
+    payload = json.loads(decision_path.read_text(encoding="utf-8"))
+    payload["provenance"]["source"]["mode"] = "merged"
+    payload["provenance"]["source"]["extra"] = {"nested": True, "camera": "back"}
+    decision_path.write_text(json.dumps(payload), encoding="utf-8")
+    item = queries.audit_index(cfg)["samples"][0]
+    assert item["source_extra"]["camera"] == "back"
+    assert item["source_extra"]["nested"] is True
+    assert item["source_extra"]["mode"] == "merged"
+    assert item["source_extra"]["event_id"] == "en1"
+    assert "extra" not in item["source_extra"]
