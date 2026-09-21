@@ -113,7 +113,7 @@ class DatasetBuilder:
             if not anns:
                 summary.skipped_no_box += 1
                 continue
-            usable = [
+            boxed = [
                 a
                 for a in anns
                 if a.label in class_id
@@ -124,15 +124,22 @@ class DatasetBuilder:
                 and a.y1 is not None
                 and a.y2 > a.y1
             ]
-            if not usable:
+            if not boxed:
                 summary.skipped_class += 1
                 continue
 
-            primary = usable[0].label
-            if max_per_class is not None and cap_counts.get(primary, 0) >= max_per_class:
-                summary.skipped_cap += 1
-                continue
-            cap_counts[primary] = cap_counts.get(primary, 0) + 1
+            usable = boxed
+            if max_per_class is not None:
+                kept = []
+                for a in boxed:
+                    if cap_counts.get(a.label, 0) >= max_per_class:
+                        continue
+                    cap_counts[a.label] = cap_counts.get(a.label, 0) + 1
+                    kept.append(a)
+                if not kept:
+                    summary.skipped_cap += 1
+                    continue
+                usable = kept
 
             source_path = Path(sample.image_path) if sample.image_path else None
             if source_path is None or not source_path.is_file():
@@ -216,7 +223,10 @@ class DatasetBuilder:
         quality: str | None,
         since: str | None = None,
     ):
-        query = self.db.session().query(Sample)
+        from ..models import Annotation
+
+        session = self.db.session()
+        query = session.query(Sample)
         query = query.filter(Sample.status == "collected")
         if since is not None:
             query = query.filter(Sample.created_at >= since)
@@ -227,11 +237,19 @@ class DatasetBuilder:
         if cameras:
             query = query.filter(Sample.camera.in_(cameras))
         if labels:
-            query = query.filter(Sample.frigate_label.in_(labels))
+            with_label = (
+                session.query(Annotation.sample_id)
+                .filter(Annotation.label.in_(labels))
+            )
+            query = query.filter(Sample.id.in_(with_label))
         return query.all()
 
     def _best_annotations(self, sample: Sample, verified_only: bool):
-        """Prefer verified (VLM/human) annotations; fall back to Frigate rows."""
+        """Prefer verified (VLM/human) annotations; fall back to Frigate rows.
+
+        Verified annotations win outright; the unverified fallback is deduped
+        against them so one physical object is never emitted twice.
+        """
         from ..models import Annotation
 
         with self.db.session() as session:
@@ -244,7 +262,7 @@ class DatasetBuilder:
             verified_anns = [a for a in anns if a.verified == 1]
             if verified_only:
                 return verified_anns
-            return verified_anns or anns[:1]
+            return _dedupe_annotations(verified_anns + [a for a in anns if a.verified != 1])
 
     @staticmethod
     def _write_split_files(target: Path) -> None:
@@ -267,6 +285,54 @@ class DatasetBuilder:
 def _to_yolo_line(ann, class_id: dict[str, int]) -> YoloLine:
     cx, cy, w, h = bbox_to_yolo(ann.x1, ann.y1, ann.x2, ann.y2)
     return YoloLine(class_id=class_id[ann.label], cx=cx, cy=cy, w=w, h=h)
+
+
+_SOURCE_RANK = {"vlm": 0, "human": 1, "external": 2, "frigate": 3}
+
+
+def _dedupe_annotations(anns):
+    """Keep one box per physical object: suppress lower-priority annotations.
+
+    Priority is verified first, then source (vlm/human > external > frigate),
+    then created_at/id for determinism. A lower-priority annotation is dropped
+    when an already-selected annotation has the same label and IoU > 0.5.
+    Different-label boxes are never suppressed, even when they overlap (a
+    person on a motorcycle is still two objects). Boxes are normalized, so IoU
+    is computed directly from x1/y1/x2/y2.
+    """
+    ordered = sorted(
+        anns,
+        key=lambda a: (
+            -int(a.verified),
+            _SOURCE_RANK.get(a.source, 10),
+            a.created_at or "",
+            a.id,
+        ),
+    )
+    selected: list = []
+    for ann in ordered:
+        if any(_same_label_overlap(a, ann) for a in selected):
+            continue
+        selected.append(ann)
+    return selected
+
+
+def _same_label_overlap(a, b) -> bool:
+    if a.label != b.label:
+        return False
+    coords = (a.x1, a.y1, a.x2, a.y2, b.x1, b.y1, b.x2, b.y2)
+    if any(c is None for c in coords):
+        return False
+    ax1, ay1, ax2, ay2, bx1, by1, bx2, by2 = coords
+    inter_w = min(ax2, bx2) - max(ax1, bx1)
+    inter_h = min(ay2, by2) - max(ay1, by1)
+    if inter_w <= 0 or inter_h <= 0:
+        return False
+    inter = inter_w * inter_h
+    union = (ax2 - ax1) * (ay2 - ay1) + (bx2 - bx1) * (by2 - by1) - inter
+    if union <= 0:
+        return False
+    return inter / union > 0.5
 
 
 __all__ = ["DatasetBuilder", "BuildSummary"]
