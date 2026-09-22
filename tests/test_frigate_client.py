@@ -225,7 +225,8 @@ def test_download_region_crop_timestamp_param(mock_api, tmp_path):
     )
     client = make_client()
     client.download_region_crop("e1", tmp_path / "e1.jpg", height=640, timestamp=123.0)
-    assert mock_api.calls[0].request.url.params["timestamp"] == "123.0"
+    # 0.18 rejects non-integer timestamps (int_parsing 422); always send ints
+    assert mock_api.calls[0].request.url.params["timestamp"] == "123"
     client.close()
 
 

@@ -1,0 +1,42 @@
+# Keep the build context small (it is shipped over NFS into the Frigate LXC).
+.git
+.venv
+.venv-hailo-dfc
+.pytest_cache
+.ruff_cache
+__pycache__
+*.pyc
+*.egg-info
+
+# Runtime data (never baked into the image; bind-mounted from ./data at runtime)
+data
+previews
+golden
+training
+audit
+training_audit
+runs
+.hf-cache
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite3
+
+# Secrets / host-local config
+.env
+config.yaml
+config.local.yaml
+config.docker.yaml
+
+# Large reproducible artifacts (model weights, Hailo DFC wheel)
+*.whl
+*.pt
+best.onnx
+best.hef
+
+# Hailo DFC container source (built separately via containers/hailo-dfc)
+containers
+
+# OS / editor litter
+.DS_Store

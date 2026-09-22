@@ -169,7 +169,7 @@ def _step_build(config: AppConfig, db: Database, ctx: dict) -> StepReport:
 
     version = next_build_version(config)
     builder = DatasetBuilder(config, db)
-    summary = builder.build(version)
+    summary = builder.build(version, verified_only=config.dataset.verified_only)
     ctx["version"] = version
     return StepReport(
         name="build",

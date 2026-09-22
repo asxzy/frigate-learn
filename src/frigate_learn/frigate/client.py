@@ -388,7 +388,8 @@ class FrigateClient:
         """
         params = clean_snapshot_params()
         if timestamp is not None and timestamp > 0:
-            params["timestamp"] = timestamp
+            # 0.18 parses timestamp as int; floats get 422.
+            params["timestamp"] = int(timestamp)
         return self._download(
             clean_snapshot_url(event_id),
             output_path,
@@ -419,7 +420,8 @@ class FrigateClient:
         """
         params = region_crop_params(height)
         if timestamp is not None and timestamp > 0:
-            params["timestamp"] = timestamp
+            # 0.18 parses timestamp as int; floats get 422.
+            params["timestamp"] = int(timestamp)
         return self._download(
             clean_snapshot_url(event_id),
             output_path,

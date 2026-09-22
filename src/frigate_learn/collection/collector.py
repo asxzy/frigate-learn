@@ -29,7 +29,7 @@ from ..config import AppConfig
 from ..db import Database
 from ..frigate.client import FrigateAPIError, FrigateClient
 from ..frigate.reviews import extract_event_ids
-from ..logutil import debug, error, info
+from ..logutil import debug, error, info, warning
 from ..models import Annotation, CollectionFailure, Job, Sample, utcnow
 from .dedup import dhash_file, hamming_distance
 from .sampling import sample_timestamps
@@ -534,7 +534,11 @@ class Collector:
                                     annotations=annotations, merged=merged)
             return EventOutcome(status="dup", stored=0, skipped=skipped)
         except FrigateAPIError as exc:
-            error("event failed (api)", event_id=event_id, error=str(exc))
+            if exc.status_code == 404:
+                # event/review pruned by Frigate while we were collecting
+                warning("event unreachable", event_id=event_id, status="404")
+            else:
+                error("event failed (api)", event_id=event_id, error=str(exc))
             self._record_failure(event_id, f"{exc}")
             return EventOutcome(status="fail", error=str(exc))
         except IntegrityError as exc:

@@ -10,6 +10,7 @@ __pycache__/
 .env
 config.yaml
 config.local.yaml
+config.docker.yaml
 
 # local runtime state
 data/

@@ -93,6 +93,16 @@ class VLMSettings:
 
 
 @dataclass
+class DatasetSettings:
+    """Versioned dataset build behavior (used by `run` and the webapp)."""
+
+    # Include samples labeled only by Frigate (verified=0). VLM-verified
+    # annotations are always preferred; when the verify stage is disabled
+    # (vlm.enabled=false) this must be false or build outputs an empty set.
+    verified_only: bool = True
+
+
+@dataclass
 class TrainingSettings:
     image_size: int = 320
     epochs: int = 50
@@ -232,6 +242,7 @@ class AppConfig:
     collection: CollectionSettings = field(default_factory=CollectionSettings)
     sampling: SamplingSettings = field(default_factory=SamplingSettings)
     vlm: VLMSettings = field(default_factory=VLMSettings)
+    dataset: DatasetSettings = field(default_factory=DatasetSettings)
     training: TrainingSettings = field(default_factory=TrainingSettings)
     evaluation: EvaluationSettings = field(default_factory=EvaluationSettings)
     deployment: DeploymentSettings = field(default_factory=DeploymentSettings)
@@ -484,6 +495,9 @@ def build_config(raw: dict[str, Any], base_dir: Path) -> AppConfig:
     cfg.vlm.system_prompt = str(
         _pop(vlm, "system_prompt", cfg.vlm.system_prompt)
     )
+
+    ds = _section(raw, "dataset")
+    cfg.dataset.verified_only = bool(_pop(ds, "verified_only", cfg.dataset.verified_only))
 
     tr = _section(raw, "training")
     cfg.training.image_size = int(_pop(tr, "image_size", cfg.training.image_size))

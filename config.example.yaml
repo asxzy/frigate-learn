@@ -123,6 +123,10 @@ hailo:
   calib_samples: 64
   interactive: false           # non-interactive DFC: auto-accept NMS/reparse prompts
 
+# Versioned dataset build behavior (used by `run` and the webapp).
+dataset:
+  verified_only: true          # false => ALSO write samples labeled only by Frigate (verified=0)
+
 # P13 - what `frigate-learn run` (and the nightly cron) executes.
 automation:
   enable:
